@@ -9,10 +9,10 @@
   var TABS = [
     { id: "portada", icon: "🏡", label: "Portada", color: "var(--purple)", colorDark: "var(--purple-d)" },
     { id: "instrucciones", icon: "🧭", label: "Instrucciones", color: "var(--purple)", colorDark: "var(--purple-d)" },
-    { id: "codigoA", icon: "🌀", label: "Código A · Sobrecarga", color: "var(--purple)", colorDark: "var(--purple-d)" },
-    { id: "codigoB", icon: "💗", label: "Código B · Esencia", color: "var(--pink)", colorDark: "var(--pink-d)" },
-    { id: "codigoC", icon: "🌿", label: "Código C · Fortaleza", color: "var(--turquoise)", colorDark: "var(--turquoise-d)" },
-    { id: "codigoD", icon: "☀️", label: "Código D · Camino de Vida", color: "var(--yellow)", colorDark: "var(--yellow-d)" },
+    { id: "codigoA", icon: "🌀", label: "Fase 1 - Sobrecarga", color: "var(--purple)", colorDark: "var(--purple-d)" },
+    { id: "codigoB", icon: "💗", label: "Fase 2 - Esencia", color: "var(--pink)", colorDark: "var(--pink-d)" },
+    { id: "codigoC", icon: "🌿", label: "Fase 3 - Fortaleza", color: "var(--turquoise)", colorDark: "var(--turquoise-d)" },
+    { id: "codigoD", icon: "☀️", label: "Fase 4 - Camino de Vida", color: "var(--yellow)", colorDark: "var(--yellow-d)" },
     { id: "fase5", icon: "✨", label: "Fase 5 · Alineación Total", color: "var(--purple)", colorDark: "var(--purple-d)" },
     { id: "fase6", icon: "🕊️", label: "Fase 6 · Reencuentro Sagrado", color: "var(--turquoise)", colorDark: "var(--turquoise-d)" },
     { id: "cierre", icon: "🎁", label: "Cierre & Descarga", color: "var(--yellow)", colorDark: "var(--yellow-d)" }
@@ -69,7 +69,7 @@
         } else if (data && data.reason === "used") {
           showGate(
             "Este enlace ya fue utilizado",
-            "Este Mapa de Reconexión Personal™ ya fue generado anteriormente con este enlace. Cada acceso es válido para un solo uso. Si necesitas ayuda, contacta a Tere Becerra Huerta."
+            "Este Mapa de Reconexión Personal™ ya fue generado anteriormente con este enlace. Cada acceso es válido para un solo uso. Si necesitas ayuda, contacta a soporte@terebecerrahuerta.net o escríbenos al 871-111-4224."
           );
         } else {
           showGate(
@@ -218,7 +218,10 @@
   }
 
   function isStep(text) {
-    return /^PASO\s+\d+/i.test(text.trim());
+    // "PASO N · ..." (Fase 6) o "CIERRE · ..." (el único "paso" de la pestaña
+    // de Cierre — build_content.py renombra ahí el antiguo "PASO 3" para que
+    // no aparezca un número de paso fuera de contexto).
+    return /^PASO\s+\d+/i.test(text.trim()) || /^CIERRE\s*·/i.test(text.trim());
   }
 
   function isHeading(text) {
@@ -259,6 +262,10 @@
         blocks.push({ kind: "signature", lines: item.lines });
         return;
       }
+      if (item.type === "declaration") {
+        blocks.push({ kind: "declaration", text: item.text });
+        return;
+      }
       if (item.type === "table") {
         var rows = item.rows;
         if (rows.length === 1) {
@@ -272,7 +279,7 @@
       }
       var text = item.text;
       if (isDivider(text)) { blocks.push({ kind: "divider" }); return; }
-      if (isStep(text)) { blocks.push({ kind: "step", text: text.replace(/^PASO\s+\d+\s*·?\s*/i, function(m){return m;}) }); return; }
+      if (isStep(text)) { blocks.push({ kind: "step", text: text }); return; }
       if (isHeading(text)) { blocks.push({ kind: "heading", text: text }); return; }
       if (/^(coloca una mano|antes de leer)/i.test(text.trim()) === false && /respira profundo/i.test(text)) {
         blocks.push({ kind: "callout", text: text });
@@ -323,9 +330,15 @@
           break;
         case "step":
           var stepWrap = el("div", "block-step");
-          var num = (/PASO\s+(\d+)/i.exec(b.text) || [, "•"])[1];
+          // Los pasos numerados ("PASO 1", "PASO 2"...) muestran su número.
+          // El paso de cierre ("CIERRE · ...") no tiene un número real dentro
+          // de esa pestaña (es el único que aparece ahí), así que en vez de un
+          // número fuera de contexto usamos un símbolo de cierre/logro (✓).
+          var stepMatch = /PASO\s+(\d+)/i.exec(b.text);
+          var num = stepMatch ? stepMatch[1] : "✓";
           var badge = el("div", "step-badge", num);
-          var label = el("div", "step-text", escapeHtml(b.text.replace(/^PASO\s+\d+\s*·?\s*/i, "")));
+          if (!stepMatch) badge.classList.add("step-badge-closing");
+          var label = el("div", "step-text", escapeHtml(b.text.replace(/^(PASO\s+\d+|CIERRE)\s*·?\s*/i, "")));
           stepWrap.appendChild(badge);
           stepWrap.appendChild(label);
           container.appendChild(stepWrap);
@@ -335,6 +348,11 @@
           break;
         case "paragraph":
           container.appendChild(el("p", "block-p", escapeHtml(b.text)));
+          break;
+        case "declaration":
+          var declCard = el("div", "declaration-card");
+          declCard.appendChild(el("div", "declaration-text", escapeHtml(b.text)));
+          container.appendChild(declCard);
           break;
         case "card":
           renderCard(container, b.card);
@@ -362,6 +380,7 @@
     hero.style.setProperty("--panel-gradient", opts.gradient);
     hero.style.setProperty("--panel-color", opts.color);
     hero.style.setProperty("--panel-color-dark", opts.colorDark);
+    if (opts.phase) hero.appendChild(el("div", "phase-label", escapeHtml(opts.phase)));
     if (opts.eyebrow) hero.appendChild(el("div", "eyebrow", escapeHtml(opts.eyebrow)));
     hero.appendChild(el("h2", "", escapeHtml(opts.title)));
     if (opts.number !== undefined) hero.appendChild(el("div", "panel-number", opts.number));
@@ -420,12 +439,15 @@
     renderBlocks(container, normalizeItems(CONTENT.instrucciones));
   }
 
+  var CODE_PHASE_NUMBER = { A: 1, B: 2, C: 3, D: 4 };
+
   function buildCodigo(container, code) {
     var num = String(state.codes[code]);
     var items = CONTENT.codigos[code][num];
     var color = META.codeColors[code];
     var colorDark = META.codeColorsDark[code];
     panelHero(container, {
+      phase: "Fase " + CODE_PHASE_NUMBER[code],
       eyebrow: META.codeFullTitles[code],
       title: "Tu número es " + num,
       color: color, colorDark: colorDark,
@@ -472,7 +494,7 @@
 
     var box = el("div", "download-box");
     box.innerHTML = "<p>Lleva contigo tu Mapa completo, listo para imprimir y releer cuantas veces tu corazón lo necesite.</p>";
-    var btn = el("button", "btn-download", "⬇️ Descargar Mi Mapa Personalizado (Word)");
+    var btn = el("button", "btn-download", "⬇️ Descargar Mi Mapa Personalizado (PDF)");
     btn.id = "downloadBtn";
     btn.addEventListener("click", handleDownload);
     box.appendChild(btn);
@@ -520,13 +542,15 @@
 
       var navActions = el("div", "panel-nav-actions");
       var prevBtn = el("button", "nav-arrow", "← Anterior");
-      var nextBtn = el("button", "nav-arrow", "Siguiente →");
       prevBtn.addEventListener("click", function () { goToTab(Math.max(0, idx - 1)); });
-      nextBtn.addEventListener("click", function () { goToTab(Math.min(TABS.length - 1, idx + 1)); });
       if (idx === 0) prevBtn.disabled = true;
-      if (idx === TABS.length - 1) nextBtn.disabled = true;
       navActions.appendChild(prevBtn);
-      navActions.appendChild(nextBtn);
+      // La última pestaña (Cierre) no necesita "Siguiente": ya no hay a dónde avanzar.
+      if (idx !== TABS.length - 1) {
+        var nextBtn = el("button", "nav-arrow", "Siguiente →");
+        nextBtn.addEventListener("click", function () { goToTab(Math.min(TABS.length - 1, idx + 1)); });
+        navActions.appendChild(nextBtn);
+      }
       contentWrap.appendChild(navActions);
 
       panel.appendChild(contentWrap);
@@ -546,190 +570,135 @@
       navButtons[idx].scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
     }
     window.scrollTo({ top: 0, behavior: "smooth" });
+    updateProgress(idx);
+  }
+
+  function updateProgress(idx) {
+    var fill = document.getElementById("progressFill");
+    if (!fill) return;
+    var pct = ((idx + 1) / TABS.length) * 100;
+    fill.style.width = pct + "%";
+    fill.style.background = "linear-gradient(90deg, " + TABS[idx].colorDark + ", " + TABS[idx].color + ")";
   }
 
   /* ---------------------------------------------------------
-     7. GENERACIÓN DE DOCUMENTO WORD
+     7. GENERACIÓN DE PDF
+     El PDF se genera capturando el mismo diseño visual que ya ve la
+     clienta (héroes con degradados de color, tarjetas, insignias de
+     paso, firma) en vez de texto plano — por eso reutilizamos las
+     funciones BUILDERS existentes en un contenedor invisible, y luego
+     tomamos una "foto" de alta resolución que se recorta en páginas
+     tamaño Carta con jsPDF.
      --------------------------------------------------------- */
-  function blocksToDocx(blocks, D) {
-    var out = [];
-    var HL = D.HeadingLevel;
-    blocks.forEach(function (b) {
-      switch (b.kind) {
-        case "divider":
-          out.push(new D.Paragraph({ text: "✦  ✦  ✦", alignment: D.AlignmentType.CENTER, spacing: { before: 200, after: 200 } }));
-          break;
-        case "heading":
-          out.push(new D.Paragraph({ text: b.text, heading: HL.HEADING_3, spacing: { before: 300, after: 150 } }));
-          break;
-        case "step":
-          out.push(new D.Paragraph({
-            children: [new D.TextRun({ text: b.text.toUpperCase(), bold: true, color: "8B85CA" })],
-            spacing: { before: 300, after: 150 }
-          }));
-          break;
-        case "callout":
-          b.text.split("\n").forEach(function (line) {
-            out.push(new D.Paragraph({ children: [new D.TextRun({ text: line, italics: true })], spacing: { after: 80 } }));
-          });
-          break;
-        case "paragraph":
-          b.text.split("\n").forEach(function (line) {
-            out.push(new D.Paragraph({ text: line, spacing: { after: 120 } }));
-          });
-          break;
-        case "signature":
-          out.push(new D.Paragraph({ text: "", spacing: { before: 200 } }));
-          b.lines.forEach(function (line, i) {
-            out.push(new D.Paragraph({
-              children: [new D.TextRun({ text: line, bold: i === 0 })],
-              alignment: D.AlignmentType.CENTER,
-              spacing: { after: 60 }
-            }));
-          });
-          break;
-        case "card":
-          out.push(cardTitlePara(b.card, D));
-          out = out.concat(cardBodyParas(b.card, D));
-          break;
-        case "cardgrid":
-          b.cards.forEach(function (card) {
-            out.push(cardTitlePara(card, D));
-            out = out.concat(cardBodyParas(card, D));
-          });
-          break;
-      }
+  function buildExportRoot() {
+    var root = el("div", "pdf-export-root");
+    root.style.position = "fixed";
+    root.style.left = "-10000px";
+    root.style.top = "0";
+    root.style.width = "820px";
+    root.style.background = "#FAFAF8";
+    document.body.appendChild(root);
+
+    var sectionBuilders = [
+      buildPortada,
+      buildInstrucciones,
+      function (c) { buildCodigo(c, "A"); },
+      function (c) { buildCodigo(c, "B"); },
+      function (c) { buildCodigo(c, "C"); },
+      function (c) { buildCodigo(c, "D"); },
+      buildFase5,
+      buildFase6,
+      buildCierre
+    ];
+
+    sectionBuilders.forEach(function (fn) {
+      var wrap = el("div", "pdf-section");
+      fn(wrap);
+      // El botón de descarga no tiene sentido dentro del propio PDF.
+      var dl = wrap.querySelector(".download-box");
+      if (dl && dl.parentNode) dl.parentNode.removeChild(dl);
+      root.appendChild(wrap);
     });
-    return out;
+
+    return root;
   }
 
-  function cardTitlePara(card, D) {
-    return new D.Paragraph({
-      children: [new D.TextRun({ text: card.title, bold: true })],
-      spacing: { before: 200, after: 80 },
-      shading: { fill: "F5F3EC" }
-    });
+  function cleanupExportRoot(root) {
+    if (root && root.parentNode) root.parentNode.removeChild(root);
   }
 
-  function cardBodyParas(card, D) {
-    var arr = [];
-    card.groups.forEach(function (g) {
-      if (g.type === "plain") {
-        arr.push(new D.Paragraph({ text: g.lines.join(" "), spacing: { after: 100 } }));
-      } else {
-        g.lines.forEach(function (line) {
-          arr.push(new D.Paragraph({
-            text: (g.type === "checkbox" ? "☐ " : "•  ") + line,
-            indent: { left: 300 },
-            spacing: { after: 60 }
-          }));
+  function renderCanvasToPdf(canvas) {
+    var jsPDF = window.jspdf.jsPDF;
+    var pageW = 612, pageH = 792; // Carta, en puntos
+    var margin = 34;
+    var contentW = pageW - margin * 2;
+    var pxPerPt = canvas.width / contentW;
+    var pageHeightPx = Math.max(1, Math.floor((pageH - margin * 2) * pxPerPt));
+
+    var pdf = new jsPDF({ unit: "pt", format: "letter" });
+    var renderedY = 0;
+    var pageIndex = 0;
+
+    while (renderedY < canvas.height) {
+      var sliceHeightPx = Math.min(pageHeightPx, canvas.height - renderedY);
+      var sliceCanvas = document.createElement("canvas");
+      sliceCanvas.width = canvas.width;
+      sliceCanvas.height = sliceHeightPx;
+      var ctx = sliceCanvas.getContext("2d");
+      ctx.fillStyle = "#FAFAF8";
+      ctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
+      ctx.drawImage(canvas, 0, renderedY, canvas.width, sliceHeightPx, 0, 0, canvas.width, sliceHeightPx);
+
+      var imgData = sliceCanvas.toDataURL("image/jpeg", 0.93);
+      var sliceHeightPt = sliceHeightPx / pxPerPt;
+
+      if (pageIndex > 0) pdf.addPage();
+      pdf.addImage(imgData, "JPEG", margin, margin, contentW, sliceHeightPt);
+
+      renderedY += sliceHeightPx;
+      pageIndex++;
+    }
+
+    var safeName = state.name.trim().replace(/\s+/g, "_").replace(/[\\/:*?"<>|]/g, "");
+    var dateStr = pad2(state.day) + "_" + pad2(state.month) + "_" + state.year;
+    pdf.save("Mapa_" + safeName + "_" + dateStr + ".pdf");
+  }
+
+  function generatePdf() {
+    var root = buildExportRoot();
+    return new Promise(function (resolve) { setTimeout(resolve, 80); })
+      .then(function () {
+        return window.html2canvas(root, {
+          scale: 2,
+          backgroundColor: "#FAFAF8",
+          useCORS: true,
+          windowWidth: root.scrollWidth
         });
-      }
-    });
-    return arr;
-  }
-
-  function buildDocxSectionTitle(D, text, color) {
-    return new D.Paragraph({
-      children: [new D.TextRun({ text: text, bold: true, size: 32, color: color || "2D2A26" })],
-      heading: D.HeadingLevel.HEADING_1,
-      spacing: { before: 600, after: 300 },
-      pageBreakBefore: true
-    });
+      })
+      .then(function (canvas) {
+        cleanupExportRoot(root);
+        renderCanvasToPdf(canvas);
+      })
+      .catch(function (err) {
+        cleanupExportRoot(root);
+        throw err;
+      });
   }
 
   function handleDownload() {
     var btn = document.getElementById("downloadBtn");
     btn.disabled = true;
+    var originalText = btn.textContent;
     btn.textContent = "Generando tu documento…";
 
-    setTimeout(function () {
-      try {
-        generateDocx();
-      } catch (err) {
+    generatePdf()
+      .catch(function (err) {
         console.error(err);
         alert("Ocurrió un problema generando el documento. Intenta de nuevo.");
-      }
-      btn.disabled = false;
-      btn.textContent = "⬇️ Descargar Mi Mapa Personalizado (Word)";
-    }, 50);
-  }
-
-  function generateDocx() {
-    var D = window.docx;
-    var children = [];
-
-    // Portada
-    children.push(new D.Paragraph({ text: "MAPA DE RECONEXIÓN PERSONAL™", heading: D.HeadingLevel.TITLE, alignment: D.AlignmentType.CENTER, spacing: { after: 100 } }));
-    children.push(new D.Paragraph({ text: "Tu Viaje de Regreso a Casa", alignment: D.AlignmentType.CENTER, italics: true, spacing: { after: 300 } }));
-    children.push(new D.Paragraph({
-      children: [new D.TextRun({ text: state.name, bold: true, size: 30 })],
-      alignment: D.AlignmentType.CENTER, spacing: { after: 100 }
-    }));
-    children.push(new D.Paragraph({
-      text: "Fecha de nacimiento: " + pad2(state.day) + "/" + pad2(state.month) + "/" + state.year,
-      alignment: D.AlignmentType.CENTER, spacing: { after: 300 }
-    }));
-
-    var codeRow = ["A", "B", "C", "D"].map(function (k) {
-      return "Código " + k + " (" + META.codeNames[k] + "): " + state.codes[k];
-    });
-    codeRow.forEach(function (line) {
-      children.push(new D.Paragraph({
-        children: [new D.TextRun({ text: line, bold: true })],
-        alignment: D.AlignmentType.CENTER,
-        spacing: { after: 80 }
-      }));
-    });
-
-    children = children.concat(blocksToDocx(normalizeItems(CONTENT.portada), D));
-
-    // Instrucciones
-    children.push(buildDocxSectionTitle(D, "Instrucciones", "8B85CA"));
-    children = children.concat(blocksToDocx(normalizeItems(CONTENT.instrucciones), D));
-
-    // Códigos A-D
-    var codeTitles = { A: "F5C4B8", B: "E7BBD7", C: "AFE2E3", D: "F3EFA1" };
-    ["A", "B", "C", "D"].forEach(function (code) {
-      var num = String(state.codes[code]);
-      children.push(buildDocxSectionTitle(D, META.codeFullTitles[code] + " · Número " + num, "2D2A26"));
-      var items = CONTENT.codigos[code][num];
-      if (items) children = children.concat(blocksToDocx(normalizeItems(items), D));
-    });
-
-    // Fase 5
-    children.push(buildDocxSectionTitle(D, "Fase 5 · La Alineación Total™"));
-    children = children.concat(blocksToDocx(normalizeItems(CONTENT.fase5), D));
-
-    // Fase 6
-    children.push(buildDocxSectionTitle(D, "Fase 6 · El Reencuentro Sagrado™"));
-    children = children.concat(blocksToDocx(normalizeItems(CONTENT.fase6), D));
-
-    // Cierre
-    children.push(buildDocxSectionTitle(D, "Cierre"));
-    children = children.concat(blocksToDocx(normalizeItems(CONTENT.cierre), D));
-
-    var doc = new D.Document({
-      sections: [{ properties: {}, children: children }],
-      styles: {
-        default: {
-          document: { run: { font: "Georgia", size: 22 } }
-        }
-      }
-    });
-
-    D.Packer.toBlob(doc).then(function (blob) {
-      var safeName = state.name.trim().replace(/\s+/g, "_").replace(/[\\/:*?"<>|]/g, "");
-      var dateStr = pad2(state.day) + "_" + pad2(state.month) + "_" + state.year;
-      var filename = "Mapa_" + safeName + "_" + dateStr + ".docx";
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
-    });
+      })
+      .then(function () {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      });
   }
 })();
