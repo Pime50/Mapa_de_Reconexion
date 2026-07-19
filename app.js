@@ -69,7 +69,7 @@
         } else if (data && data.reason === "used") {
           showGate(
             "Este enlace ya fue utilizado",
-            "Este Mapa de Reconexión Personal™ ya fue generado anteriormente con este enlace. Cada acceso es válido para un solo uso. Si necesitas ayuda, contacta a soporte@terebecerrahuerta.net o escríbenos al 871-111-4224."
+            "Este Mapa de Reconexión Personal™ ya fue generado anteriormente con este enlace. Cada acceso es válido para un solo uso.\n\nSi necesitas ayuda, contacta a soporte@terebecerrahuerta.net o escríbenos al +(52) 871-111-4224."
           );
         } else {
           showGate(
@@ -526,8 +526,13 @@
 
     var nav = document.getElementById("tabNav");
     var panelsWrap = document.getElementById("tabPanels");
+    var progressTrack = document.getElementById("progressTrack");
     nav.innerHTML = "";
     panelsWrap.innerHTML = "";
+    if (progressTrack) {
+      progressTrack.innerHTML = "";
+      TABS.forEach(function () { progressTrack.appendChild(el("div", "progress-seg")); });
+    }
 
     TABS.forEach(function (tab, idx) {
       var btn = el("button", "tab-btn", '<span class="tab-icon">' + tab.icon + "</span><span>" + tab.label + "</span>");
@@ -574,11 +579,17 @@
   }
 
   function updateProgress(idx) {
-    var fill = document.getElementById("progressFill");
-    if (!fill) return;
-    var pct = ((idx + 1) / TABS.length) * 100;
-    fill.style.width = pct + "%";
-    fill.style.background = "linear-gradient(90deg, " + TABS[idx].colorDark + ", " + TABS[idx].color + ")";
+    var track = document.getElementById("progressTrack");
+    if (!track) return;
+    var segs = track.querySelectorAll(".progress-seg");
+    segs.forEach(function (seg, i) {
+      var isFilled = i <= idx;
+      seg.classList.toggle("filled", isFilled);
+      seg.classList.toggle("current", i === idx);
+      seg.style.background = isFilled
+        ? "linear-gradient(90deg, " + TABS[i].colorDark + ", " + TABS[i].color + ")"
+        : "";
+    });
   }
 
   /* ---------------------------------------------------------
@@ -627,7 +638,53 @@
     if (root && root.parentNode) root.parentNode.removeChild(root);
   }
 
-  function renderCanvasToPdf(canvas) {
+  var PDF_SCALE = 2; // debe coincidir con el "scale" pasado a html2canvas más abajo
+
+  // Elementos que NUNCA deben quedar cortados a la mitad entre dos páginas
+  // (párrafos, tarjetas, encabezados, firma, la tarjeta de la declaración, etc.).
+  var PDF_UNBREAKABLE_SELECTOR = [
+    ".block-p", ".block-heading", ".block-step", ".block-callout",
+    ".card", ".card-grid", ".signature-block", ".declaration-card",
+    ".panel-hero", ".portada-codes", ".footer-note", ".block-divider"
+  ].join(", ");
+
+  // Recolecta, MIENTRAS el contenedor de exportación todavía está en el DOM,
+  // el rango vertical (en px de documento, no de canvas) que ocupa cada
+  // elemento "no partible". Esto se usa después para que el corte de cada
+  // página del PDF nunca caiga dentro de uno de estos rangos.
+  function collectBreakRects(root) {
+    var rootTop = root.getBoundingClientRect().top;
+    var rects = [];
+    root.querySelectorAll(PDF_UNBREAKABLE_SELECTOR).forEach(function (elx) {
+      var r = elx.getBoundingClientRect();
+      rects.push({ top: r.top - rootTop, bottom: r.bottom - rootTop });
+    });
+    return rects;
+  }
+
+  // Dado un corte deseado (en px de documento), si cae dentro de alguno de
+  // los rangos "no partibles", lo empuja hacia arriba hasta el inicio de ese
+  // elemento — así el elemento completo pasa a la siguiente página en vez de
+  // quedar cortado a la mitad.
+  function findSafeCut(desiredYDom, rects) {
+    var y = desiredYDom;
+    var changed = true;
+    var guard = 0;
+    while (changed && guard < 25) {
+      changed = false;
+      guard++;
+      for (var i = 0; i < rects.length; i++) {
+        var r = rects[i];
+        if (y > r.top + 0.5 && y < r.bottom - 0.5) {
+          y = r.top;
+          changed = true;
+        }
+      }
+    }
+    return y;
+  }
+
+  function renderCanvasToPdf(canvas, breakRects) {
     var jsPDF = window.jspdf.jsPDF;
     var pageW = 612, pageH = 792; // Carta, en puntos
     var margin = 34;
@@ -640,7 +697,18 @@
     var pageIndex = 0;
 
     while (renderedY < canvas.height) {
-      var sliceHeightPx = Math.min(pageHeightPx, canvas.height - renderedY);
+      var desiredEnd = Math.min(renderedY + pageHeightPx, canvas.height);
+      var safeEnd = desiredEnd;
+      if (desiredEnd < canvas.height) {
+        var desiredEndDom = desiredEnd / PDF_SCALE;
+        var safeEndDom = findSafeCut(desiredEndDom, breakRects);
+        safeEnd = Math.round(safeEndDom * PDF_SCALE);
+        // Si un solo bloque es más alto que una página completa, no hay corte
+        // seguro posible: usamos el corte "duro" original como último recurso.
+        if (safeEnd <= renderedY) safeEnd = desiredEnd;
+      }
+      var sliceHeightPx = safeEnd - renderedY;
+
       var sliceCanvas = document.createElement("canvas");
       sliceCanvas.width = canvas.width;
       sliceCanvas.height = sliceHeightPx;
@@ -655,7 +723,7 @@
       if (pageIndex > 0) pdf.addPage();
       pdf.addImage(imgData, "JPEG", margin, margin, contentW, sliceHeightPt);
 
-      renderedY += sliceHeightPx;
+      renderedY = safeEnd;
       pageIndex++;
     }
 
@@ -668,16 +736,21 @@
     var root = buildExportRoot();
     return new Promise(function (resolve) { setTimeout(resolve, 80); })
       .then(function () {
+        // Se recolectan los rangos "no partibles" ANTES de capturar/limpiar,
+        // mientras el contenedor sigue en el DOM y sus medidas son válidas.
+        var breakRects = collectBreakRects(root);
         return window.html2canvas(root, {
-          scale: 2,
+          scale: PDF_SCALE,
           backgroundColor: "#FAFAF8",
           useCORS: true,
           windowWidth: root.scrollWidth
+        }).then(function (canvas) {
+          return { canvas: canvas, breakRects: breakRects };
         });
       })
-      .then(function (canvas) {
+      .then(function (result) {
         cleanupExportRoot(root);
-        renderCanvasToPdf(canvas);
+        renderCanvasToPdf(result.canvas, result.breakRects);
       })
       .catch(function (err) {
         cleanupExportRoot(root);

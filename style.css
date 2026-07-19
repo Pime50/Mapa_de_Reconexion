@@ -143,6 +143,11 @@ button{font-family:inherit;cursor:pointer;border:none;}
   font-family:'Playfair Display',serif;
 }
 
+#gateMessage{
+  white-space:pre-line;
+  line-height:1.7;
+}
+
 .field{
   text-align:left;
   margin-bottom:22px;
@@ -312,21 +317,33 @@ button{font-family:inherit;cursor:pointer;border:none;}
   box-shadow:0 8px 20px -6px var(--tab-color, var(--purple));
 }
 
-/* Progress bar (debajo de las pestañas) */
+/* Barra de progreso "termómetro" (debajo de las pestañas).
+   Es una fila de segmentos independientes en vez de una línea continua,
+   a propósito: para que no se confunda con la barra de scroll de las
+   pestañas de arriba (que también es una línea delgada). */
 .progress-track{
-  height:6px;
-  margin:0 5vw 18px;
-  background:#ECE8DE;
+  display:flex;
+  align-items:center;
+  gap:5px;
+  margin:2px 5vw 22px;
+  padding:6px 10px;
   border-radius:100px;
-  overflow:hidden;
+  background:rgba(45,42,38,0.045);
+  box-shadow:inset 0 1px 3px rgba(45,42,38,0.06);
   flex:0 0 auto;
 }
-.progress-fill{
-  height:100%;
-  width:11.11%;
+.progress-seg{
+  flex:1 1 0;
+  height:7px;
   border-radius:100px;
-  background:linear-gradient(90deg, var(--purple-d), var(--purple));
-  transition:width 0.5s cubic-bezier(.22,.61,.36,1), background 0.6s ease;
+  background:rgba(45,42,38,0.10);
+  transition:background 0.4s ease, transform 0.35s cubic-bezier(.22,.61,.36,1), box-shadow 0.4s ease;
+}
+.progress-seg.filled{
+  box-shadow:0 2px 6px -1px rgba(45,42,38,0.22);
+}
+.progress-seg.current{
+  transform:scaleY(1.45);
 }
 
 /* Panels */
@@ -615,4 +632,55 @@ button{font-family:inherit;cursor:pointer;border:none;}
   margin:44px 0 10px;
   padding:40px 28px;
   border-radius:var(--radius-lg);
-  background:linear-gradient(135
+  background:linear-gradient(135deg, rgba(139,133,202,0.14), rgba(231,187,215,0.14), rgba(175,226,227,0.14), rgba(243,239,161,0.18));
+}
+.download-box p{color:var(--text-secondary);font-size:14px;margin-bottom:22px;}
+.btn-download{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  padding:18px 34px;
+  border-radius:100px;
+  color:#fff;
+  font-weight:600;
+  font-size:15.5px;
+  background:linear-gradient(120deg, var(--purple-d), var(--pink-d) 45%, var(--turquoise-d) 75%, var(--yellow-d));
+  background-size:220% 220%;
+  box-shadow:0 14px 34px rgba(139,133,202,0.35);
+  transition:transform 0.3s, box-shadow 0.3s, background-position 0.6s;
+}
+.btn-download:hover{transform:translateY(-2px);background-position:100% 50%;}
+.btn-download:disabled{opacity:0.6;cursor:wait;transform:none;}
+
+.footer-note{
+  text-align:center;
+  font-size:12px;
+  color:var(--text-secondary);
+  opacity:0.75;
+  margin:40px 0 10px;
+}
+
+/* Nav bottom actions */
+.panel-nav-actions{
+  display:flex;
+  justify-content:space-between;
+  margin-top:44px;
+  gap:12px;
+}
+.nav-arrow{
+  background:#fff;
+  border:1.5px solid #ECE8DE;
+  border-radius:100px;
+  padding:12px 22px;
+  font-size:13.5px;
+  font-weight:500;
+  color:var(--text);
+  transition:all 0.3s;
+}
+.nav-arrow:hover{border-color:var(--purple);color:var(--purple-d);}
+.nav-arrow:disabled{opacity:0.35;cursor:default;}
+
+@media(max-width:640px){
+  .form-card{padding:40px 24px;}
+  .tab-panels{padding:10px 5vw 60px;}
+}
