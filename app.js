@@ -737,11 +737,79 @@
     return rects;
   }
 
+  // Selectores de elementos que pueden contener texto largo en varias
+  // líneas (párrafos, líneas de tarjeta, declaraciones, callouts). Se usan
+  // para calcular puntos de corte "entre líneas" cuando el bloque completo
+  // no cabe en una sola página — ver collectLineBreaks más abajo.
+  var PDF_TEXT_SELECTOR = [
+    ".block-p", ".block-callout", ".declaration-text",
+    ".card-line", ".card-title", ".step-text"
+  ].join(", ");
+
+  // Recolecta el borde INFERIOR de cada línea visual de texto dentro de los
+  // elementos de PDF_TEXT_SELECTOR, usando Range.getClientRects() (que
+  // reporta un rectángulo por cada línea en la que el navegador partió el
+  // texto al hacer wrap). Estos puntos son la red de seguridad para cuando
+  // un bloque "no partible" (p.ej. una tarjeta con un párrafo largo) es más
+  // alto que una página completa: sin esto, el único corte disponible caía
+  // a mitad de una palabra. Con esto, el corte siempre puede caer entre dos
+  // líneas de texto, nunca en medio de una.
+  function collectLineBreaks(root) {
+    var lines = [];
+    root.querySelectorAll(PDF_TEXT_SELECTOR).forEach(function (elx) {
+      var elOffset = offsetFrom(elx, root);
+      var elRectTop = elx.getBoundingClientRect().top;
+      var range = document.createRange();
+      // Recorremos los nodos de texto directos del elemento (no de
+      // sub-elementos) para no duplicar medidas de hijos ya cubiertos por
+      // su propio selector.
+      Array.prototype.forEach.call(elx.childNodes, function (node) {
+        if (node.nodeType !== Node.TEXT_NODE || !node.textContent.trim()) return;
+        range.selectNodeContents(node);
+        var clientRects = range.getClientRects();
+        Array.prototype.forEach.call(clientRects, function (r) {
+          // r.bottom es relativo al viewport; lo convertimos a la misma
+          // escala "offset de documento" que usa offsetFrom, usando el
+          // propio elemento como referencia (su top en viewport vs su
+          // offsetTop en documento).
+          var bottomInDoc = elOffset + (r.bottom - elRectTop);
+          lines.push(bottomInDoc);
+        });
+      });
+    });
+    lines.sort(function (a, b) { return a - b; });
+    return lines;
+  }
+
+  // Dado un corte deseado, busca la línea de texto más cercana (por
+  // debajo, para no perder contenido) dentro de un pequeño margen. Se usa
+  // SOLO cuando el bloque no partible que contiene el corte es más alto
+  // que una página completa — en ese caso ya no buscamos mantener el
+  // bloque entero (es imposible), sino evitar partir una línea a la mitad.
+  function nearestLineBreak(y, lineBreaks, searchWindow) {
+    var best = null;
+    var bestDist = Infinity;
+    for (var i = 0; i < lineBreaks.length; i++) {
+      var lb = lineBreaks[i];
+      if (lb <= y + 0.5 && (y - lb) < searchWindow) {
+        var dist = y - lb;
+        if (dist < bestDist) { bestDist = dist; best = lb; }
+      }
+    }
+    return best;
+  }
+
   // Dado un corte deseado (en px de documento), si cae dentro de alguno de
   // los rangos "no partibles", lo empuja hacia arriba hasta el inicio de ese
   // elemento — así el elemento completo pasa a la siguiente página en vez de
-  // quedar cortado a la mitad.
-  function findSafeCut(desiredYDom, rects) {
+  // quedar cortado a la mitad. Si el bloque no partible es más alto que una
+  // página completa (nunca va a caber entero, ni siquiera empezando limpio
+  // en una página nueva), se calcula el corte dentro de ESE bloque en la
+  // posición de la línea de texto más cercana, para que el corte caiga
+  // siempre entre líneas y nunca a mitad de una — usando como referencia el
+  // inicio del bloque, para aprovechar el máximo espacio posible antes del
+  // primer corte.
+  function findSafeCut(desiredYDom, rects, lineBreaks, pageHeightDom) {
     var y = desiredYDom;
     var changed = true;
     var guard = 0;
@@ -751,8 +819,20 @@
       for (var i = 0; i < rects.length; i++) {
         var r = rects[i];
         if (y > r.top + 0.5 && y < r.bottom - 0.5) {
-          y = r.top;
-          changed = true;
+          var blockHeight = r.bottom - r.top;
+          if (blockHeight <= pageHeightDom) {
+            // Cabe entero: lo empujamos a que empiece en página nueva.
+            y = r.top;
+            changed = true;
+          } else {
+            // No cabe entero en ninguna página: el corte más útil es al
+            // final de la primera página completa contada DESDE el inicio
+            // del bloque (para aprovechar el máximo espacio posible), justo
+            // en la línea de texto más cercana a ese punto.
+            var maxY = r.top + pageHeightDom;
+            var lb = lineBreaks ? nearestLineBreak(maxY, lineBreaks, pageHeightDom) : null;
+            return (lb !== null && lb > r.top) ? lb : r.top;
+          }
         }
       }
     }
@@ -770,11 +850,12 @@
   // "rebanadas" al PDF como páginas, en vez de un canvas único gigante.
   var SAFE_CANVAS_AREA = 15000000; // margen prudente bajo el límite más estricto conocido en iOS
 
-  function renderSectionToPdf(pdf, pdfState, canvas, breakRects) {
+  function renderSectionToPdf(pdf, pdfState, canvas, breakRects, lineBreaks) {
     var margin = pdfState.margin;
     var contentW = pdfState.contentW;
     var pageHeightPx = pdfState.pageHeightPx;
     var pxPerPt = pdfState.pxPerPt;
+    var pageHeightDom = pageHeightPx / PDF_SCALE;
 
     var renderedY = 0;
     var guard = 0;
@@ -795,7 +876,7 @@
       var safeEnd = desiredEnd;
       if (desiredEnd < canvas.height) {
         var desiredEndDom = desiredEnd / PDF_SCALE;
-        var safeEndDom = findSafeCut(desiredEndDom, breakRects);
+        var safeEndDom = findSafeCut(desiredEndDom, breakRects, lineBreaks, pageHeightDom);
         safeEnd = Math.round(safeEndDom * PDF_SCALE);
         if (safeEnd <= renderedY) safeEnd = desiredEnd;
       }
@@ -856,9 +937,11 @@
 
     return new Promise(function (resolve) { setTimeout(resolve, 80); })
       .then(function () {
-        // Se recolectan los rangos "no partibles" de TODAS las secciones
-        // ANTES de capturar/limpiar, mientras el contenedor sigue en el DOM.
+        // Se recolectan los rangos "no partibles" y los puntos de corte
+        // entre líneas de TODAS las secciones ANTES de capturar/limpiar,
+        // mientras el contenedor sigue en el DOM y sus medidas son válidas.
         var sectionBreakRects = sections.map(function (s) { return collectBreakRects(s); });
+        var sectionLineBreaks = sections.map(function (s) { return collectLineBreaks(s); });
 
         var pdf = new jsPDF({ unit: "pt", format: "letter" });
         // jsPDF crea la página 1 automáticamente al construirse. Usamos esa
@@ -903,7 +986,7 @@
                 pdfState.pageStarted = false;
               }
 
-              renderSectionToPdf(pdf, pdfState, canvas, sectionBreakRects[i]);
+              renderSectionToPdf(pdf, pdfState, canvas, sectionBreakRects[i], sectionLineBreaks[i]);
             });
           });
         });
