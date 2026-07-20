@@ -18,43 +18,58 @@ por si prefieres subir la carpeta completa como reemplazo directo.
 
 ---
 
-## Ronda 4 — corte de palabras entre páginas del PDF (causa raíz real)
+## Ronda 5 — causa raíz REAL del corte de líneas por la mitad (confirmada y verificada)
 
-**Archivo:** `app.js` → `collectLineBreaks` (nueva), `nearestLineBreak`
-(nueva), `findSafeCut` (reescrita), `renderSectionToPdf`, `generatePdf`
+Esta vez el reporte fue más específico y clave para encontrar el problema
+real: no era una palabra dividida en dos renglones (eso ya estaba
+resuelto desde la Ronda 4), sino la MISMA línea de texto rebanada
+horizontalmente por la mitad — la mitad superior de las letras quedaba al
+fondo de una página, y la mitad inferior de esas mismas letras aparecía
+al inicio de la siguiente.
 
-El sistema ya sabía mantener un bloque completo (un párrafo, una tarjeta)
-sin partirlo entre dos páginas — pero no tenía ninguna estrategia para
-cuando ese bloque era, él solo, más alto que una página entera (por
-ejemplo la tarjeta "CONSECUENCIA" con un párrafo largo dentro de "PASO 3 ·
-DESCUBRE TU PATRÓN OCULTO"). En ese caso, al no encontrar ningún corte
-"seguro", el sistema usaba como último recurso un corte "duro" en
-cualquier punto — lo que podía caer a mitad de una palabra u oración.
+**Archivo:** `app.js` → `buildExportRoot` (una línea clave agregada)
 
-La solución agrega una segunda red de seguridad, más fina: además de los
-rangos de bloques completos, ahora también se mide la posición exacta de
-cada LÍNEA de texto individual (aprovechando cómo el navegador ya partió
-cada párrafo al hacer word-wrap). Cuando un bloque es más alto que una
-página, el sistema:
-1. Lo inicia en una página nueva y limpia, para aprovechar el máximo
-   espacio posible antes del primer corte.
-2. Calcula el corte exactamente en el límite entre dos líneas de texto
-   dentro de ese bloque — nunca a mitad de una.
+Causa encontrada instrumentando la generación real del PDF (no una
+simulación) y comparando los números exactos que el sistema estaba
+usando: el contenedor de cada sección del Mapa (`.pdf-section`) no tenía
+la propiedad CSS `position: relative`. Sin ella, el navegador no lo trata
+como una referencia válida al medir "a qué distancia está este texto
+del inicio de su sección" — y en ciertos casos la medición se saltaba esa
+sección por completo y sumaba también la altura de TODAS las secciones
+anteriores del documento (Portada + Instrucciones + Código A, etc.),
+dando coordenadas de línea equivocadas por miles de píxeles.
 
-**Verificación exhaustiva:** generé el Mapa completo (32 páginas) con el
-mismo caso que reportaste (Código A, tarjeta "CONSECUENCIA") y confirmé
-visualmente que el corte ahora cae al final de una oración completa. Además
-recorrí las 32 páginas con tres métodos de verificación independientes:
-inspección visual directa, un análisis automático de fin/inicio de oración
-en cada salto de página, y una búsqueda específica de guiones de corte de
-sílabas (el indicador definitivo de una palabra partida). Ningún método
-encontró palabras cortadas a la mitad en el documento completo.
+Con esas coordenadas mal calculadas, la protección "no cortar a mitad de
+una línea de texto" (agregada en la Ronda 4) comparaba contra posiciones
+que no correspondían al texto real — por eso parecía estar activa pero
+nunca lograba evitar el corte real.
 
-Nota: en un punto del documento (fin de la Fase 6) el corte deja una
-única línea corta al inicio de la página siguiente ("viuda" tipográfica)
-— esto es una cuestión estética menor, no un corte de palabra, y no es lo
-que se reportó. Si en algún momento se quiere pulir eso también, es un
-ajuste independiente y menor.
+La corrección es una sola línea: `wrap.style.position = "relative"` al
+crear cada sección de exportación. Con eso, la medición de posición de
+cada línea de texto queda exacta.
+
+**Verificación:** reproduje tu caso exacto (Código B, número 1, tarjeta
+"SEÑALES DE QUE HABITAS TU ESENCIA", específicamente el ítem "Inicias
+nuevos proyectos desde la claridad, no desde la urgencia") generando el
+PDF real y confirmé que antes del fix esa línea aparecía duplicada y
+rebanada entre dos páginas, y después del fix aparece una sola vez,
+completa, sin cortes. Además recorrí las 32 páginas del documento
+completo buscando específicamente el patrón de "línea repetida/duplicada
+entre página y la siguiente" (el síntoma exacto que reportaste) y no
+quedó ninguno.
+
+---
+
+## Ronda 4 — protección contra bloques más altos que una página
+
+**Archivo:** `app.js` → `collectLineBreaks`, `findSafeCut` (reescrita)
+
+Se agregó la capacidad de cortar por línea de texto (no solo por bloque
+completo) para cuando un bloque como una tarjeta larga no cabe entero en
+una página. Este cambio era necesario pero, como se descubrió en la
+Ronda 5, no era suficiente por sí solo: la medición de posición de cada
+línea tenía el bug de `position: relative` descrito arriba, que hacía
+que la protección no funcionara en la práctica para varios casos.
 
 ---
 
@@ -64,28 +79,22 @@ ajuste independiente y menor.
 `panelHero` actualizada
 **Archivo:** `style.css` → `.block-callout`
 
-Reproduje el flujo completo (formulario → generar Mapa → descargar PDF)
-en un navegador real de forma automatizada para capturar el error exacto.
-Causa: `color-mix()` (usado en la Ronda 1 para el resaltado) no es
-compatible con `html2canvas@1.4.1` — lanza `Attempting to parse an
-unsupported color function` al intentar capturar la página, lo que
-interrumpía toda la generación del PDF. Se veía perfecto en el navegador
-normal (por eso el resaltado en sí quedó confirmado como correcto), pero
-rompía específicamente la conversión a PDF.
+`color-mix()` (usado en la Ronda 1 para el resaltado) no es compatible
+con `html2canvas@1.4.1` — lanza `Attempting to parse an unsupported
+color function` al capturar la página, lo que interrumpía toda la
+generación del PDF. Solución: el color de fondo del bloque de revelación
+ahora se calcula en JavaScript con `rgba()` en vez de con `color-mix()`.
 
-Solución: el color de fondo del bloque de revelación ahora se calcula en
-JavaScript con `rgba()` (la misma técnica ya usada, sin problemas, para
-los degradados de fondo), en vez de con la función CSS `color-mix()`.
-Visualmente idéntico, 100% compatible con html2canvas.
-
-**Confirmado por Tere: el PDF ya abre correctamente en iPhone.**
+**Confirmado por Tere: el PDF ya abre correctamente en iPhone, y el
+resaltado del bloque de revelación quedó correcto.**
 
 ---
 
 ## Ronda 2
 
 ### Error al descargar el PDF (paginado) — bug real corregido, pero no
-era la causa raíz del error reportado (esa se identificó en la Ronda 3)
+era la causa raíz del error reportado en ese momento (esa se identificó
+en la Ronda 3)
 **Archivo:** `app.js` → `renderSectionToPdf`, `generatePdf`
 
 ### El texto de revelación clave no quedaba resaltado
@@ -111,6 +120,3 @@ número del contenido actual. **Confirmado por Tere: quedó correcto.**
 
 Captura del Mapa sección por sección para no exceder el límite de área de
 canvas de Safari/iOS. **Confirmado por Tere: quedó correcto.**
-
-
-
