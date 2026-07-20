@@ -399,21 +399,6 @@
   /* ---------------------------------------------------------
      5. CONSTRUCCIÓN DE PANELES
      --------------------------------------------------------- */
-  function panelHero(container, opts) {
-    var hero = el("div", "panel-hero");
-    hero.style.setProperty("--panel-gradient", opts.gradient);
-    hero.style.setProperty("--panel-color", opts.color);
-    hero.style.setProperty("--panel-color-dark", opts.colorDark);
-    if (opts.phase) hero.appendChild(el("div", "phase-label", escapeHtml(opts.phase)));
-    if (opts.eyebrow) hero.appendChild(el("div", "eyebrow", escapeHtml(opts.eyebrow)));
-    hero.appendChild(el("h2", "", escapeHtml(opts.title)));
-    if (opts.number !== undefined) hero.appendChild(el("div", "panel-number", opts.number));
-    if (opts.tagline) hero.appendChild(el("div", "panel-tagline", escapeHtml(opts.tagline)));
-    container.appendChild(hero);
-    container.style.setProperty("--panel-color", opts.color);
-    container.style.setProperty("--panel-color-dark", opts.colorDark);
-  }
-
   function gradientFor(hex) {
     return "linear-gradient(135deg, " + hexToRgba(hex, 0.22) + ", " + hexToRgba(hex, 0.06) + ")";
   }
@@ -423,7 +408,50 @@
     return "rgba(" + r + "," + g + "," + b + "," + a + ")";
   }
 
+  // Los 4 colores de tema tal como están definidos en :root (style.css).
+  // panelHero() a veces recibe "var(--purple)" y a veces un hex real
+  // (META.codeColors), así que esta tabla permite resolver cualquiera de
+  // los dos casos a un hex utilizable por hexToRgba().
+  var THEME_HEX = {
+    "var(--purple)": "#8B85CA",
+    "var(--pink)": "#E7BBD7",
+    "var(--turquoise)": "#AFE2E3",
+    "var(--yellow)": "#F3EFA1"
+  };
+  function resolveHex(color) {
+    return THEME_HEX[color] || color;
+  }
+
+  // Fondo del bloque de revelación clave (.block-callout): un tinte muy
+  // suave del color de la fase actual. Se calcula aquí como rgba() fijo,
+  // en vez de con la función CSS color-mix(), porque html2canvas@1.4.1
+  // (usado para generar el PDF) no reconoce color-mix() y lanza
+  // "Attempting to parse an unsupported color function" al capturar la
+  // página — eso rompía la descarga del PDF por completo. rgba() con un
+  // valor numérico ya resuelto es 100% compatible con html2canvas, y
+  // visualmente da el mismo resultado.
+  function calloutBgFor(color) {
+    return hexToRgba(resolveHex(color), 0.16);
+  }
+
   var META = CONTENT.meta;
+
+  function panelHero(container, opts) {
+    var hero = el("div", "panel-hero");
+    hero.style.setProperty("--panel-gradient", opts.gradient);
+    hero.style.setProperty("--panel-color", opts.color);
+    hero.style.setProperty("--panel-color-dark", opts.colorDark);
+    hero.style.setProperty("--panel-callout-bg", calloutBgFor(opts.color));
+    if (opts.phase) hero.appendChild(el("div", "phase-label", escapeHtml(opts.phase)));
+    if (opts.eyebrow) hero.appendChild(el("div", "eyebrow", escapeHtml(opts.eyebrow)));
+    hero.appendChild(el("h2", "", escapeHtml(opts.title)));
+    if (opts.number !== undefined) hero.appendChild(el("div", "panel-number", opts.number));
+    if (opts.tagline) hero.appendChild(el("div", "panel-tagline", escapeHtml(opts.tagline)));
+    container.appendChild(hero);
+    container.style.setProperty("--panel-color", opts.color);
+    container.style.setProperty("--panel-color-dark", opts.colorDark);
+    container.style.setProperty("--panel-callout-bg", calloutBgFor(opts.color));
+  }
 
   function buildPortada(container) {
     panelHero(container, {
@@ -894,16 +922,82 @@
       });
   }
 
+  /* ---------------------------------------------------------
+     6.5 GARANTÍA DE LIBRERÍAS EXTERNAS (jsPDF / html2canvas)
+     Ambas se cargan desde un CDN externo en <head> (index.html). Si esa
+     carga falla o queda incompleta por CUALQUIER motivo — bloqueador de
+     anuncios/rastreo, red restrictiva, script cacheado a medias, o la
+     usuaria haciendo click antes de que termine de cargar — el error real
+     era "Cannot read properties of undefined (reading 'jsPDF')", que el
+     catch general disfrazaba como "Ocurrió un problema generando el
+     documento" sin ninguna pista útil. En vez de asumir que las librerías
+     ya están disponibles, las verificamos y, si faltan, intentamos
+     cargarlas de nuevo (con una fuente alterna de respaldo) antes de
+     generar el PDF.
+     --------------------------------------------------------- */
+  var LIB_SOURCES = {
+    html2canvas: [
+      "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
+      "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"
+    ],
+    jspdf: [
+      "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+      "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
+    ]
+  };
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = src;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error("No se pudo cargar " + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function loadFromSources(sources) {
+    var i = 0;
+    function attempt() {
+      if (i >= sources.length) return Promise.reject(new Error("Ninguna fuente disponible"));
+      var src = sources[i++];
+      return loadScript(src).catch(attempt);
+    }
+    return attempt();
+  }
+
+  function ensurePdfLibraries() {
+    var needsHtml2canvas = typeof window.html2canvas === "undefined";
+    var needsJsPdf = !(window.jspdf && window.jspdf.jsPDF);
+
+    if (!needsHtml2canvas && !needsJsPdf) return Promise.resolve();
+
+    var tasks = [];
+    if (needsHtml2canvas) tasks.push(loadFromSources(LIB_SOURCES.html2canvas));
+    if (needsJsPdf) tasks.push(loadFromSources(LIB_SOURCES.jspdf));
+
+    return Promise.all(tasks).then(function () {
+      if (typeof window.html2canvas === "undefined" || !(window.jspdf && window.jspdf.jsPDF)) {
+        throw new Error("Las herramientas para generar el PDF no cargaron correctamente. Revisa tu conexión a internet e intenta de nuevo.");
+      }
+    });
+  }
+
   function handleDownload() {
     var btn = document.getElementById("downloadBtn");
     btn.disabled = true;
     var originalText = btn.textContent;
     btn.textContent = "Generando tu documento…";
 
-    generatePdf()
+    ensurePdfLibraries()
+      .then(function () { return generatePdf(); })
       .catch(function (err) {
-        console.error(err);
-        alert("Ocurrió un problema generando el documento. Intenta de nuevo.");
+        console.error("[Mapa PDF] Error generando documento:", err);
+        var detail = (err && err.message) || "";
+        var friendly = detail && /conexión|internet|cargaron/i.test(detail)
+          ? detail
+          : "Ocurrió un problema generando el documento. Revisa tu conexión a internet e intenta de nuevo.";
+        alert(friendly);
       })
       .then(function () {
         btn.disabled = false;
