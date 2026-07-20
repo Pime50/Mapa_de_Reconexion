@@ -622,6 +622,8 @@
       buildCierre
     ];
 
+    var sections = [];
+
     sectionBuilders.forEach(function (fn) {
       var wrap = el("div", "pdf-section");
       fn(wrap);
@@ -629,9 +631,10 @@
       var dl = wrap.querySelector(".download-box");
       if (dl && dl.parentNode) dl.parentNode.removeChild(dl);
       root.appendChild(wrap);
+      sections.push(wrap);
     });
 
-    return root;
+    return { root: root, sections: sections };
   }
 
   function cleanupExportRoot(root) {
@@ -648,16 +651,36 @@
     ".panel-hero", ".portada-codes", ".footer-note", ".block-divider"
   ].join(", ");
 
+  // Distancia vertical real de un elemento respecto a `root`, sumando
+  // offsetTop a través de toda la cadena de offsetParent. A propósito NO
+  // usamos getBoundingClientRect(): ese método mide contra el viewport
+  // visible, y root es un contenedor gigante fuera de pantalla
+  // (position:fixed; left:-10000px) que puede medir miles de píxeles de
+  // alto — en documentos así, getBoundingClientRect() puede devolver
+  // valores inconsistentes con el canvas real que captura html2canvas,
+  // lo que dejaba pasar cortes a la mitad de un párrafo o tarjeta.
+  // offsetTop, en cambio, es una medida de layout del documento, estable
+  // sin importar el alto total ni si el elemento está fuera de pantalla.
+  function offsetFrom(elx, root) {
+    var y = 0;
+    var node = elx;
+    while (node && node !== root) {
+      y += node.offsetTop || 0;
+      node = node.offsetParent;
+    }
+    return y;
+  }
+
   // Recolecta, MIENTRAS el contenedor de exportación todavía está en el DOM,
   // el rango vertical (en px de documento, no de canvas) que ocupa cada
   // elemento "no partible". Esto se usa después para que el corte de cada
   // página del PDF nunca caiga dentro de uno de estos rangos.
   function collectBreakRects(root) {
-    var rootTop = root.getBoundingClientRect().top;
     var rects = [];
     root.querySelectorAll(PDF_UNBREAKABLE_SELECTOR).forEach(function (elx) {
-      var r = elx.getBoundingClientRect();
-      rects.push({ top: r.top - rootTop, bottom: r.bottom - rootTop });
+      var top = offsetFrom(elx, root);
+      var bottom = top + elx.offsetHeight;
+      rects.push({ top: top, bottom: bottom });
     });
     return rects;
   }
@@ -684,30 +707,44 @@
     return y;
   }
 
-  function renderCanvasToPdf(canvas, breakRects) {
-    var jsPDF = window.jspdf.jsPDF;
-    var pageW = 612, pageH = 792; // Carta, en puntos
-    var margin = 34;
-    var contentW = pageW - margin * 2;
-    var pxPerPt = canvas.width / contentW;
-    var pageHeightPx = Math.max(1, Math.floor((pageH - margin * 2) * pxPerPt));
+  // Safari en iOS limita el área de un <canvas> a un valor mucho más bajo
+  // que Chrome/Firefox/desktop (históricamente ~16.7M px, algo más en
+  // versiones recientes, pero siempre muy por debajo de los 268M+ que
+  // permite Chrome). Un solo canvas con las 9 secciones completas del Mapa
+  // supera ese límite con facilidad, y html2canvas no lanza error: Safari
+  // simplemente entrega un canvas vacío/transparente, y el PDF sale en
+  // blanco. La solución es capturar CADA SECCIÓN por separado (canvas
+  // pequeño, muy por debajo del límite) y position ir añadiendo sus
+  // "rebanadas" al PDF como páginas, en vez de un canvas único gigante.
+  var SAFE_CANVAS_AREA = 15000000; // margen prudente bajo el límite más estricto conocido en iOS
 
-    var pdf = new jsPDF({ unit: "pt", format: "letter" });
+  function renderSectionToPdf(pdf, pdfState, canvas, breakRects) {
+    var margin = pdfState.margin;
+    var contentW = pdfState.contentW;
+    var pageHeightPx = pdfState.pageHeightPx;
+    var pxPerPt = pdfState.pxPerPt;
+
     var renderedY = 0;
-    var pageIndex = 0;
-
     while (renderedY < canvas.height) {
-      var desiredEnd = Math.min(renderedY + pageHeightPx, canvas.height);
+      var remainingOnPage = pageHeightPx - pdfState.usedHeightPx;
+      var desiredEnd = Math.min(renderedY + remainingOnPage, canvas.height);
       var safeEnd = desiredEnd;
       if (desiredEnd < canvas.height) {
         var desiredEndDom = desiredEnd / PDF_SCALE;
         var safeEndDom = findSafeCut(desiredEndDom, breakRects);
         safeEnd = Math.round(safeEndDom * PDF_SCALE);
-        // Si un solo bloque es más alto que una página completa, no hay corte
-        // seguro posible: usamos el corte "duro" original como último recurso.
         if (safeEnd <= renderedY) safeEnd = desiredEnd;
       }
       var sliceHeightPx = safeEnd - renderedY;
+      if (sliceHeightPx <= 0) { renderedY = desiredEnd; continue; }
+
+      // Si no cabe nada de esta rebanada en lo que resta de la página actual,
+      // pasamos a una página nueva antes de dibujar.
+      if (pdfState.usedHeightPx > 0 && remainingOnPage <= 0) {
+        pdf.addPage();
+        pdfState.usedHeightPx = 0;
+        continue;
+      }
 
       var sliceCanvas = document.createElement("canvas");
       sliceCanvas.width = canvas.width;
@@ -720,37 +757,102 @@
       var imgData = sliceCanvas.toDataURL("image/jpeg", 0.93);
       var sliceHeightPt = sliceHeightPx / pxPerPt;
 
-      if (pageIndex > 0) pdf.addPage();
-      pdf.addImage(imgData, "JPEG", margin, margin, contentW, sliceHeightPt);
+      if (pdfState.pageStarted) {
+        pdf.addImage(imgData, "JPEG", margin, margin + pdfState.usedHeightPt, contentW, sliceHeightPt);
+      } else {
+        pdf.addImage(imgData, "JPEG", margin, margin, contentW, sliceHeightPt);
+        pdfState.pageStarted = true;
+      }
+      pdfState.usedHeightPt += sliceHeightPt;
+      pdfState.usedHeightPx += sliceHeightPx;
 
       renderedY = safeEnd;
-      pageIndex++;
-    }
 
-    var safeName = state.name.trim().replace(/\s+/g, "_").replace(/[\\/:*?"<>|]/g, "");
-    var dateStr = pad2(state.day) + "_" + pad2(state.month) + "_" + state.year;
-    pdf.save("Mapa_" + safeName + "_" + dateStr + ".pdf");
+      // Si aún queda contenido de esta sección por dibujar, la siguiente
+      // rebanada siempre empieza en una página nueva.
+      if (renderedY < canvas.height) {
+        pdf.addPage();
+        pdfState.usedHeightPx = 0;
+        pdfState.usedHeightPt = 0;
+        pdfState.pageStarted = false;
+      }
+    }
+  }
+
+  function captureSection(sectionEl) {
+    var rect = sectionEl.getBoundingClientRect();
+    var area = rect.width * rect.height * PDF_SCALE * PDF_SCALE;
+    var scale = PDF_SCALE;
+    if (area > SAFE_CANVAS_AREA) {
+      // Sección excepcionalmente larga: reducimos la escala solo para ESTA
+      // sección, lo suficiente para caber bajo el límite de Safari, sin
+      // afectar la nitidez del resto del documento.
+      scale = Math.max(1, Math.sqrt(SAFE_CANVAS_AREA / (rect.width * rect.height)));
+    }
+    return window.html2canvas(sectionEl, {
+      scale: scale,
+      backgroundColor: "#FAFAF8",
+      useCORS: true,
+      windowWidth: sectionEl.scrollWidth
+    });
   }
 
   function generatePdf() {
-    var root = buildExportRoot();
+    var built = buildExportRoot();
+    var root = built.root, sections = built.sections;
+    var jsPDF = window.jspdf.jsPDF;
+
     return new Promise(function (resolve) { setTimeout(resolve, 80); })
       .then(function () {
-        // Se recolectan los rangos "no partibles" ANTES de capturar/limpiar,
-        // mientras el contenedor sigue en el DOM y sus medidas son válidas.
-        var breakRects = collectBreakRects(root);
-        return window.html2canvas(root, {
-          scale: PDF_SCALE,
-          backgroundColor: "#FAFAF8",
-          useCORS: true,
-          windowWidth: root.scrollWidth
-        }).then(function (canvas) {
-          return { canvas: canvas, breakRects: breakRects };
+        // Se recolectan los rangos "no partibles" de TODAS las secciones
+        // ANTES de capturar/limpiar, mientras el contenedor sigue en el DOM.
+        var sectionBreakRects = sections.map(function (s) { return collectBreakRects(s); });
+
+        var pdf = new jsPDF({ unit: "pt", format: "letter" });
+        var pageW = 612, pageH = 792; // Carta, en puntos
+        var margin = 34;
+        var pdfState = {
+          margin: margin,
+          contentW: pageW - margin * 2,
+          pageHeightPx: 0, // se recalcula por sección, según su propia escala/pxPerPt
+          pxPerPt: 0,
+          usedHeightPt: 0,
+          usedHeightPx: 0,
+          pageStarted: false
+        };
+
+        // Procesamos las secciones EN SECUENCIA (no en paralelo): cada
+        // captura libera su canvas antes de crear el siguiente, lo que
+        // mantiene bajo el uso total de memoria de canvas — el segundo
+        // límite de Safari ("total canvas memory"), además del límite de
+        // área individual.
+        var chain = Promise.resolve();
+        sections.forEach(function (sectionEl, i) {
+          chain = chain.then(function () {
+            return captureSection(sectionEl).then(function (canvas) {
+              var pxPerPt = canvas.width / pdfState.contentW;
+              pdfState.pxPerPt = pxPerPt;
+              pdfState.pageHeightPx = Math.max(1, Math.floor((pageH - margin * 2) * pxPerPt));
+              renderSectionToPdf(pdf, pdfState, canvas, sectionBreakRects[i]);
+              // Cada sección nueva del Mapa empieza en su propia página,
+              // igual que en la lectura por pestañas.
+              if (i < sections.length - 1) {
+                pdf.addPage();
+                pdfState.usedHeightPx = 0;
+                pdfState.usedHeightPt = 0;
+                pdfState.pageStarted = false;
+              }
+            });
+          });
         });
+
+        return chain.then(function () { return pdf; });
       })
-      .then(function (result) {
+      .then(function (pdf) {
         cleanupExportRoot(root);
-        renderCanvasToPdf(result.canvas, result.breakRects);
+        var safeName = state.name.trim().replace(/\s+/g, "_").replace(/[\\/:*?"<>|]/g, "");
+        var dateStr = pad2(state.day) + "_" + pad2(state.month) + "_" + state.year;
+        pdf.save("Mapa_" + safeName + "_" + dateStr + ".pdf");
       })
       .catch(function (err) {
         cleanupExportRoot(root);
