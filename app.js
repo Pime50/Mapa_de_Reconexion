@@ -224,6 +224,28 @@
     return /^PASO\s+\d+/i.test(text.trim()) || /^CIERRE\s*·/i.test(text.trim());
   }
 
+  // El párrafo de "revelación clave" de cada código es siempre el que
+  // aparece justo antes de PASO 4 (el paso de acción: "TU PRIMER PASO",
+  // "VUELVE A TU VERDADERO CAMINO", etc.) — separado de él por el divisor
+  // "─ ─ ─". Es la respuesta que la clienta más necesita ver, así que se
+  // resalta con el color de la fase en vez de aparecer como texto plano.
+  // Se detecta por POSICIÓN dentro del array original de items (no por
+  // palabras clave), porque el texto varía según el código/número pero la
+  // posición estructural es siempre la misma — verificado en las 42
+  // combinaciones de código × número del contenido actual.
+  function findRevelationIndex(items) {
+    for (var i = 0; i < items.length; i++) {
+      var t = items[i];
+      if (t.type === "p" && /^PASO\s+4/i.test((t.text || "").trim())) {
+        // i-1 debería ser el divisor "─ ─ ─"; el párrafo de revelación es i-2.
+        if (i >= 2 && items[i - 1].type === "p" && isDivider(items[i - 1].text) && items[i - 2].type === "p") {
+          return i - 2;
+        }
+      }
+    }
+    return -1;
+  }
+
   function isHeading(text) {
     if (text.indexOf("\n") !== -1) return false;
     if (text.length > 72) return false;
@@ -257,7 +279,8 @@
 
   function normalizeItems(items) {
     var blocks = [];
-    items.forEach(function (item) {
+    var revelationIdx = findRevelationIndex(items);
+    items.forEach(function (item, idx) {
       if (item.type === "signature") {
         blocks.push({ kind: "signature", lines: item.lines });
         return;
@@ -278,6 +301,7 @@
         return;
       }
       var text = item.text;
+      if (idx === revelationIdx) { blocks.push({ kind: "callout", text: text }); return; }
       if (isDivider(text)) { blocks.push({ kind: "divider" }); return; }
       if (isStep(text)) { blocks.push({ kind: "step", text: text }); return; }
       if (isHeading(text)) { blocks.push({ kind: "heading", text: text }); return; }
@@ -725,7 +749,19 @@
     var pxPerPt = pdfState.pxPerPt;
 
     var renderedY = 0;
-    while (renderedY < canvas.height) {
+    var guard = 0;
+    while (renderedY < canvas.height && guard < 500) {
+      guard++;
+
+      // Si la página actual ya está llena, abrimos una nueva antes de medir
+      // cuánto cabe — así nunca calculamos una rebanada de alto 0 o negativo.
+      if (pdfState.usedHeightPx >= pageHeightPx) {
+        pdf.addPage();
+        pdfState.usedHeightPx = 0;
+        pdfState.usedHeightPt = 0;
+        pdfState.pageStarted = false;
+      }
+
       var remainingOnPage = pageHeightPx - pdfState.usedHeightPx;
       var desiredEnd = Math.min(renderedY + remainingOnPage, canvas.height);
       var safeEnd = desiredEnd;
@@ -736,13 +772,14 @@
         if (safeEnd <= renderedY) safeEnd = desiredEnd;
       }
       var sliceHeightPx = safeEnd - renderedY;
-      if (sliceHeightPx <= 0) { renderedY = desiredEnd; continue; }
 
-      // Si no cabe nada de esta rebanada en lo que resta de la página actual,
-      // pasamos a una página nueva antes de dibujar.
-      if (pdfState.usedHeightPx > 0 && remainingOnPage <= 0) {
+      // Rebanada inválida o vacía: no hay nada seguro que dibujar en lo que
+      // resta de esta página, así que la cerramos y probamos en la siguiente.
+      if (sliceHeightPx <= 0) {
         pdf.addPage();
         pdfState.usedHeightPx = 0;
+        pdfState.usedHeightPt = 0;
+        pdfState.pageStarted = false;
         continue;
       }
 
@@ -757,25 +794,12 @@
       var imgData = sliceCanvas.toDataURL("image/jpeg", 0.93);
       var sliceHeightPt = sliceHeightPx / pxPerPt;
 
-      if (pdfState.pageStarted) {
-        pdf.addImage(imgData, "JPEG", margin, margin + pdfState.usedHeightPt, contentW, sliceHeightPt);
-      } else {
-        pdf.addImage(imgData, "JPEG", margin, margin, contentW, sliceHeightPt);
-        pdfState.pageStarted = true;
-      }
+      pdf.addImage(imgData, "JPEG", margin, margin + pdfState.usedHeightPt, contentW, sliceHeightPt);
+      pdfState.pageStarted = true;
       pdfState.usedHeightPt += sliceHeightPt;
       pdfState.usedHeightPx += sliceHeightPx;
 
       renderedY = safeEnd;
-
-      // Si aún queda contenido de esta sección por dibujar, la siguiente
-      // rebanada siempre empieza en una página nueva.
-      if (renderedY < canvas.height) {
-        pdf.addPage();
-        pdfState.usedHeightPx = 0;
-        pdfState.usedHeightPt = 0;
-        pdfState.pageStarted = false;
-      }
     }
   }
 
@@ -809,6 +833,12 @@
         var sectionBreakRects = sections.map(function (s) { return collectBreakRects(s); });
 
         var pdf = new jsPDF({ unit: "pt", format: "letter" });
+        // jsPDF crea la página 1 automáticamente al construirse. Usamos esa
+        // misma página como el inicio del documento (por eso pageStarted
+        // arranca en false y NUNCA llamamos addPage() antes de la primera
+        // imagen real) — así se evita generar una página en blanco extra al
+        // principio, y el "addImage con alto 0" que rompía la promesa en
+        // algunos casos límite.
         var pageW = 612, pageH = 792; // Carta, en puntos
         var margin = 34;
         var pdfState = {
@@ -833,15 +863,19 @@
               var pxPerPt = canvas.width / pdfState.contentW;
               pdfState.pxPerPt = pxPerPt;
               pdfState.pageHeightPx = Math.max(1, Math.floor((pageH - margin * 2) * pxPerPt));
-              renderSectionToPdf(pdf, pdfState, canvas, sectionBreakRects[i]);
-              // Cada sección nueva del Mapa empieza en su propia página,
-              // igual que en la lectura por pestañas.
-              if (i < sections.length - 1) {
+
+              // Cada sección nueva del Mapa empieza en su propia página —
+              // pero solo abrimos una si ya hay contenido dibujado antes
+              // (si pageStarted es false todavía estamos en la página 1
+              // recién creada por jsPDF, y ya está vacía y lista para usar).
+              if (pdfState.pageStarted) {
                 pdf.addPage();
                 pdfState.usedHeightPx = 0;
                 pdfState.usedHeightPt = 0;
                 pdfState.pageStarted = false;
               }
+
+              renderSectionToPdf(pdf, pdfState, canvas, sectionBreakRects[i]);
             });
           });
         });

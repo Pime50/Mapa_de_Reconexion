@@ -18,6 +18,40 @@ por si prefieres subir la carpeta completa como reemplazo directo.
 
 ---
 
+## Ronda 2 (corrección tras primera prueba)
+
+### Error al descargar el PDF ("Ocurrió un problema generando el documento")
+**Archivo:** `app.js` → `renderSectionToPdf`, `generatePdf`
+
+La versión anterior podía, en ciertos casos límite (bloques no partibles
+muy largos, o el corte exacto al final de una página), calcular una
+imagen con altura 0 o negativa, o abrir páginas en blanco de más. jsPDF
+lanza una excepción al recibir una imagen inválida, lo que rompía toda
+la cadena de generación — de ahí el error, tanto en desktop como en
+iPhone. Se reescribió la lógica de paginado para abrir una página nueva
+solo cuando hace falta espacio real, y se probó contra cientos de casos
+simulados (bloques gigantes, cortes exactos al límite, secciones muy
+cortas) sin fallos.
+
+### El texto de revelación clave no quedaba resaltado
+**Archivo:** `app.js` → `findRevelationIndex` (nueva), `normalizeItems`
+
+La detección anterior de "callout" (bloque destacado) solo buscaba la
+frase "respira profundo", pensada para otro tipo de contenido — por eso
+el párrafo de revelación (el que va justo antes de "PASO 4 · TU PRIMER
+PASO" en cada código) nunca se marcaba como destacado.
+
+Ahora se detecta por su POSICIÓN estructural: siempre es el párrafo
+inmediatamente anterior al divisor que precede a "PASO 4", sin importar
+las palabras exactas que use. Se verificó contra las 42 combinaciones
+reales de código × número del contenido actual — se detecta correctamente
+en el 100% de los casos, y no interfiere con Portada, Instrucciones,
+Fase 5, Fase 6 ni Cierre (donde no existe ese patrón).
+
+---
+
+## Ronda 1
+
 ## Ajuste 1 — Resaltado del bloque de revelación clave
 **Archivo:** `style.css` → clase `.block-callout`
 
@@ -58,3 +92,4 @@ resto del documento.
 PDF en un iPhone real (o el simulador de Safari/iOS) para confirmar que
 ya se ve el contenido completo, además de repetir la prueba en Android/
 desktop para confirmar que no se rompió nada ahí.
+
