@@ -18,101 +18,96 @@ por si prefieres subir la carpeta completa como reemplazo directo.
 
 ---
 
-## Ronda 5 — causa raíz REAL del corte de líneas por la mitad (confirmada y verificada)
+## Ronda 6 — causa raíz DEFINITIVA del corte de líneas por la mitad
 
-Esta vez el reporte fue más específico y clave para encontrar el problema
-real: no era una palabra dividida en dos renglones (eso ya estaba
-resuelto desde la Ronda 4), sino la MISMA línea de texto rebanada
-horizontalmente por la mitad — la mitad superior de las letras quedaba al
-fondo de una página, y la mitad inferior de esas mismas letras aparecía
-al inicio de la siguiente.
+El fix de la Ronda 5 (agregar `position: relative`) era necesario pero
+no era la causa completa — el mismo caso reportado (Código B, tarjeta
+"SEÑALES", el ítem "Inicias nuevos proyectos...") seguía fallando después
+de aplicarlo. Esta vez, en vez de corregir y suponer que funcionaba,
+instrumenté la generación real del PDF con logs detallados en cada paso
+y localicé el mecanismo exacto del bug.
 
-**Archivo:** `app.js` → `buildExportRoot` (una línea clave agregada)
+**Archivo:** `app.js` → `findSafeCut` (cambia su valor de retorno),
+`renderSectionToPdf`
 
-Causa encontrada instrumentando la generación real del PDF (no una
-simulación) y comparando los números exactos que el sistema estaba
-usando: el contenedor de cada sección del Mapa (`.pdf-section`) no tenía
-la propiedad CSS `position: relative`. Sin ella, el navegador no lo trata
-como una referencia válida al medir "a qué distancia está este texto
-del inicio de su sección" — y en ciertos casos la medición se saltaba esa
-sección por completo y sumaba también la altura de TODAS las secciones
-anteriores del documento (Portada + Instrucciones + Código A, etc.),
-dando coordenadas de línea equivocadas por miles de píxeles.
+**El mecanismo real:** cuando el sistema detecta que una tarjeta completa
+cabe en una página y decide "empujarla para que empiece limpia en una
+página nueva", ese empuje solo movía el PUNTO DE CORTE — pero nunca le
+avisaba al generador de PDF que debía saltar de página de verdad. El
+resultado: el hueco que quedaba al final de la página anterior (por
+ejemplo 330px libres de una página de 2105px) se seguía usando para
+empezar a dibujar la tarjeta ahí mismo, en vez de en una página nueva.
+Cuando el sistema calculaba el siguiente corte ("una página completa de
+distancia desde donde vamos"), esa distancia ya no coincidía con el
+límite real de la tarjeta, y el corte cortaba a mitad de una de sus
+líneas — el síntoma exacto reportado: la misma línea con la mitad
+superior en una página y la mitad inferior en la siguiente.
 
-Con esas coordenadas mal calculadas, la protección "no cortar a mitad de
-una línea de texto" (agregada en la Ronda 4) comparaba contra posiciones
-que no correspondían al texto real — por eso parecía estar activa pero
-nunca lograba evitar el corte real.
+**La corrección:** ahora, cuando se decide empujar un bloque completo a
+página nueva, el sistema lo marca explícitamente y, después de dibujar
+lo que sí cabía antes de ese bloque, fuerza un salto de página real
+(en vez de dejar que el hueco restante se rellene con el inicio del
+bloque empujado).
 
-La corrección es una sola línea: `wrap.style.position = "relative"` al
-crear cada sección de exportación. Con eso, la medición de posición de
-cada línea de texto queda exacta.
+**Verificación exhaustiva:**
+1. Probé la lógica en aislado con los números exactos medidos del caso
+   real (escala, alturas, posiciones) antes de tocar el navegador —
+   confirmé matemáticamente que la tarjeta completa cae dentro de una
+   sola página, sin que ningún corte la atraviese.
+2. Regeneré el Mapa completo con el mismo caso exacto reportado (Código
+   B, número 1) y confirmé que la tarjeta "SEÑALES DE QUE HABITAS TU
+   ESENCIA DEL NÚMERO 1" —incluyendo el ítem "Inicias nuevos proyectos
+   desde la claridad, no desde la urgencia"— aparece completa, una sola
+   vez, sin dividirse entre dos páginas.
+3. Recorrí el documento completo (35 páginas — el conteo subió de 32 a
+   35 porque ahora se respetan más saltos de página reales en vez de
+   aprovechar huecos) buscando el mismo patrón de línea duplicada/cortada
+   en cualquier otro punto: no se encontró ninguno.
+4. Confirmé que ninguna página quedó vacía por el cambio.
 
-**Verificación:** reproduje tu caso exacto (Código B, número 1, tarjeta
-"SEÑALES DE QUE HABITAS TU ESENCIA", específicamente el ítem "Inicias
-nuevos proyectos desde la claridad, no desde la urgencia") generando el
-PDF real y confirmé que antes del fix esa línea aparecía duplicada y
-rebanada entre dos páginas, y después del fix aparece una sola vez,
-completa, sin cortes. Además recorrí las 32 páginas del documento
-completo buscando específicamente el patrón de "línea repetida/duplicada
-entre página y la siguiente" (el síntoma exacto que reportaste) y no
-quedó ninguno.
+---
+
+## Ronda 5 — position:relative (necesario pero no suficiente por sí solo)
+**Archivo:** `app.js` → `buildExportRoot`
+
+Sin `position: relative` en cada sección de exportación, la medición de
+posición de líneas de texto podía saltarse esa sección y sumar también
+la altura de secciones anteriores. Corregido, pero como se descubrió en
+la Ronda 6, había un segundo bug independiente en el mecanismo de salto
+de página que también debía corregirse para que el problema
+desapareciera del todo.
 
 ---
 
 ## Ronda 4 — protección contra bloques más altos que una página
-
-**Archivo:** `app.js` → `collectLineBreaks`, `findSafeCut` (reescrita)
-
-Se agregó la capacidad de cortar por línea de texto (no solo por bloque
-completo) para cuando un bloque como una tarjeta larga no cabe entero en
-una página. Este cambio era necesario pero, como se descubrió en la
-Ronda 5, no era suficiente por sí solo: la medición de posición de cada
-línea tenía el bug de `position: relative` descrito arriba, que hacía
-que la protección no funcionara en la práctica para varios casos.
+**Archivo:** `app.js` → `collectLineBreaks`, `findSafeCut` (versión inicial)
 
 ---
 
 ## Ronda 3 — causa raíz real del error de generación del PDF
-
 **Archivo:** `app.js` → `resolveHex`, `calloutBgFor`, `THEME_HEX`,
 `panelHero` actualizada
 **Archivo:** `style.css` → `.block-callout`
 
-`color-mix()` (usado en la Ronda 1 para el resaltado) no es compatible
-con `html2canvas@1.4.1` — lanza `Attempting to parse an unsupported
-color function` al capturar la página, lo que interrumpía toda la
-generación del PDF. Solución: el color de fondo del bloque de revelación
-ahora se calcula en JavaScript con `rgba()` en vez de con `color-mix()`.
-
-**Confirmado por Tere: el PDF ya abre correctamente en iPhone, y el
-resaltado del bloque de revelación quedó correcto.**
+`color-mix()` no es compatible con `html2canvas@1.4.1`. Solución: calcular
+el color en JavaScript con `rgba()`. **Confirmado por Tere: el PDF ya abre
+correctamente en iPhone, y el resaltado quedó correcto.**
 
 ---
 
 ## Ronda 2
-
-### Error al descargar el PDF (paginado) — bug real corregido, pero no
-era la causa raíz del error reportado en ese momento (esa se identificó
-en la Ronda 3)
-**Archivo:** `app.js` → `renderSectionToPdf`, `generatePdf`
-
 ### El texto de revelación clave no quedaba resaltado
 **Archivo:** `app.js` → `findRevelationIndex`, `normalizeItems`
 
-Detección por posición estructural (el párrafo justo antes de "PASO 4" en
-cada código), verificada contra las 42 combinaciones reales de código ×
-número del contenido actual. **Confirmado por Tere: quedó correcto.**
+Detección por posición estructural, verificada contra las 42
+combinaciones reales de código × número. **Confirmado por Tere: quedó
+correcto.**
 
 ---
 
 ## Ronda 1
-
 ### Resaltado del bloque de revelación clave
 **Archivo:** `style.css` → clase `.block-callout`
-
-### Corte de texto entre páginas del PDF — primer intento, insuficiente
-**Archivo:** `app.js` → `offsetFrom`, `collectBreakRects`
 
 ### PDF en blanco al abrir en iPhone/Safari
 **Archivo:** `app.js` → `buildExportRoot`, `generatePdf`,

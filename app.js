@@ -797,18 +797,31 @@
     return lines;
   }
 
+  // Margen de seguridad para todas las comparaciones de "¿este corte cae
+  // dentro de esta línea/bloque?". Los cálculos de corte pasan por varias
+  // conversiones encadenadas (px de documento -> px de canvas -> pt de
+  // PDF, con escalas fraccionarias como 1.9296... y Math.round() en el
+  // camino), y el error acumulado de redondeo puede superar una fracción
+  // de píxel en casos específicos — suficiente para que una línea que
+  // "por muy poco" no se detectaba como afectada terminara cortada
+  // visualmente de todos modos. Este margen amplía cada rango protegido
+  // varios píxeles hacia afuera (mucho más que el margen anterior de solo
+  // 0.5px) para absorber ese error con un colchón real, sin afectar
+  // notablemente el aprovechamiento del espacio de página.
+  var SAFE_CUT_MARGIN = 6;
+
   // Si el punto y cae DENTRO del rango de alguna línea de texto conocida
-  // (top < y < bottom, con un pequeño margen para evitar falsos positivos
-  // por redondeo), devuelve el top de esa línea — el único lugar seguro
-  // para cortar sin partirla a la mitad. Si y no cae dentro de ninguna
-  // línea (por ejemplo, está en el espacio en blanco entre dos párrafos,
-  // o ya coincide exactamente con un límite de línea), devuelve null: no
+  // (top < y < bottom, expandido por SAFE_CUT_MARGIN para absorber
+  // errores de redondeo), devuelve el top de esa línea — el único lugar
+  // seguro para cortar sin partirla a la mitad. Si y no cae dentro de
+  // ninguna línea (por ejemplo, está en el espacio en blanco entre dos
+  // párrafos, o ya coincide con un límite de línea), devuelve null: no
   // hace falta ajustar nada.
   function pushOutOfLine(y, lineBreaks) {
     for (var i = 0; i < lineBreaks.length; i++) {
       var lb = lineBreaks[i];
-      if (y > lb.top + 0.5 && y < lb.bottom - 0.5) {
-        return lb.top;
+      if (y > lb.top - SAFE_CUT_MARGIN && y < lb.bottom + SAFE_CUT_MARGIN) {
+        return lb.top - SAFE_CUT_MARGIN;
       }
     }
     return null;
@@ -824,31 +837,41 @@
     var bestDist = Infinity;
     for (var i = 0; i < lineBreaks.length; i++) {
       var top = lineBreaks[i].top;
-      if (top <= y + 0.5 && (y - top) < searchWindow) {
+      if (top <= y + SAFE_CUT_MARGIN && (y - top) < searchWindow) {
         var dist = y - top;
         if (dist < bestDist) { bestDist = dist; best = top; }
       }
     }
-    return best;
+    return best === null ? null : (best - SAFE_CUT_MARGIN);
   }
 
-  // Dado un corte deseado (en px de documento):
-  // 1) Si cae dentro de un bloque "no partible" (rects) que SÍ cabe entero
-  //    en una página, lo empuja a que ese bloque empiece limpio en una
-  //    página nueva.
+  // Dado un corte deseado (en px de documento), devuelve { y, forceNewPage }:
+  // - y: la posición final del corte.
+  // - forceNewPage: true si el motivo del corte fue "empujar un bloque
+  //   completo para que empiece limpio en una página nueva". Es una señal
+  //   importante: si el corte solo se ajustó unos píxeles hacia arriba
+  //   dentro del flujo normal, el espacio restante de la página actual se
+  //   puede seguir usando. Pero cuando se empuja un bloque entero (p.ej.
+  //   una tarjeta) a que empiece en una página nueva, ese espacio restante
+  //   NO debe rellenarse con el inicio del bloque — hay que saltar de
+  //   página de verdad. Sin esta señal, el bloque empujado terminaba
+  //   dibujándose en el hueco que quedaba al final de la página anterior,
+  //   y el siguiente corte (calculado de nuevo a "una página completa de
+  //   distancia") caía a mitad del bloque en vez de al final — este era el
+  //   bug real detrás del corte de líneas por la mitad.
+  //
+  // 1) Si el corte deseado cae dentro de un bloque "no partible" (rects)
+  //    que SÍ cabe entero en una página, se empuja el bloque a que empiece
+  //    limpio en una página nueva (forceNewPage=true).
   // 2) Si cae dentro de un bloque no partible que NUNCA cabe entero (más
   //    alto que una página), se recalcula un corte dentro de ese bloque
   //    aprovechando el máximo espacio posible, alineado a una línea.
-  // 3) SIEMPRE, como paso final — haya o no un bloque no-partible
-  //    involucrado — se verifica si el resultado cae DENTRO de una línea
-  //    de texto real y, si es así, se empuja al inicio de esa línea. Este
-  //    paso final es imprescindible: el corte puede caer en una zona sin
-  //    ningún bloque "no partible" que lo cubra (por ejemplo entre dos
-  //    ítems de una lista, dentro de una tarjeta que en conjunto sí cabe
-  //    entera) y aun así partir esa línea puntual a la mitad si no se
-  //    revisa explícitamente contra las líneas reales.
+  // 3) SIEMPRE, como paso final, se verifica si el resultado cae DENTRO de
+  //    una línea de texto real y, si es así, se empuja al inicio de esa
+  //    línea (sin forzar salto de página: es solo un ajuste fino).
   function findSafeCut(desiredYDom, rects, lineBreaks, pageHeightDom) {
     var y = desiredYDom;
+    var forceNewPage = false;
     var changed = true;
     var guard = 0;
     while (changed && guard < 25) {
@@ -856,11 +879,12 @@
       guard++;
       for (var i = 0; i < rects.length; i++) {
         var r = rects[i];
-        if (y > r.top + 0.5 && y < r.bottom - 0.5) {
+        if (y > r.top - SAFE_CUT_MARGIN && y < r.bottom + SAFE_CUT_MARGIN) {
           var blockHeight = r.bottom - r.top;
           if (blockHeight <= pageHeightDom) {
             // Cabe entero: lo empujamos a que empiece en página nueva.
-            y = r.top;
+            y = r.top - SAFE_CUT_MARGIN;
+            forceNewPage = true;
             changed = true;
           } else {
             // No cabe entero en ninguna página: el corte más útil es al
@@ -877,12 +901,13 @@
       }
     }
     // Paso final universal: si el punto resultante cae dentro de una línea
-    // de texto real, lo empujamos al inicio de esa línea.
+    // de texto real, lo empujamos al inicio de esa línea. Esto es un ajuste
+    // fino, no un "bloque completo movido" — no fuerza salto de página.
     if (lineBreaks && lineBreaks.length) {
       var pushed = pushOutOfLine(y, lineBreaks);
       if (pushed !== null) y = pushed;
     }
-    return y;
+    return { y: y, forceNewPage: forceNewPage };
   }
 
   // Safari en iOS limita el área de un <canvas> a un valor mucho más bajo
@@ -920,11 +945,19 @@
       var remainingOnPage = pageHeightPx - pdfState.usedHeightPx;
       var desiredEnd = Math.min(renderedY + remainingOnPage, canvas.height);
       var safeEnd = desiredEnd;
+      var forceNewPageAfter = false;
       if (desiredEnd < canvas.height) {
         var desiredEndDom = desiredEnd / sectionScale;
-        var safeEndDom = findSafeCut(desiredEndDom, breakRects, lineBreaks, pageHeightDom);
-        safeEnd = Math.round(safeEndDom * sectionScale);
-        if (safeEnd <= renderedY) safeEnd = desiredEnd;
+        var cut = findSafeCut(desiredEndDom, breakRects, lineBreaks, pageHeightDom);
+        safeEnd = Math.round(cut.y * sectionScale);
+        if (safeEnd <= renderedY) {
+          safeEnd = desiredEnd;
+        } else {
+          // Solo forzamos el salto de página si el corte se movió (es
+          // decir, si realmente hubo un bloque empujado) — si el corte no
+          // se movió, forceNewPage siempre viene en false de todos modos.
+          forceNewPageAfter = cut.forceNewPage;
+        }
       }
       var sliceHeightPx = safeEnd - renderedY;
 
@@ -955,6 +988,38 @@
       pdfState.usedHeightPx += sliceHeightPx;
 
       renderedY = safeEnd;
+
+      // AUDITORÍA: verificamos que el corte real aplicado no haya quedado,
+      // después de todas las conversiones y redondeos, dentro de una línea
+      // de texto conocida. Si esto ocurre pese a toda la lógica de
+      // findSafeCut, es la señal más directa posible de la causa raíz.
+      if (window.__PDF_AUDIT__ && lineBreaks && lineBreaks.length) {
+        var safeEndDomCheck = safeEnd / sectionScale;
+        for (var ai = 0; ai < lineBreaks.length; ai++) {
+          var alb = lineBreaks[ai];
+          if (safeEndDomCheck > alb.top + 0.5 && safeEndDomCheck < alb.bottom - 0.5) {
+            console.log("[AUDIT_FAIL] safeEnd cae DENTRO de una linea! safeEndDom=" + safeEndDomCheck.toFixed(2) + " line.top=" + alb.top + " line.bottom=" + alb.bottom + " sectionScale=" + sectionScale + " canvas.height=" + canvas.height + " pageHeightDom=" + pageHeightDom.toFixed(2));
+          }
+        }
+      }
+
+      // Si el corte que acabamos de dibujar fue causado por "empujar un
+      // bloque completo a que empiece limpio", el hueco que queda al final
+      // de esta página NO debe rellenarse con el inicio de ese bloque —
+      // forzamos un salto de página real aquí mismo. Sin esto, el bloque
+      // empujado terminaba dibujándose en ese hueco de todos modos (porque
+      // la página técnicamente no estaba "llena" según usedHeightPx), y el
+      // siguiente corte —calculado de nuevo a una página completa de
+      // distancia— caía a mitad del bloque en vez de al final de la
+      // página: este era el bug real detrás del corte de líneas por la
+      // mitad que se seguía viendo pese a que el corte en sí se calculaba
+      // en la posición correcta.
+      if (forceNewPageAfter && renderedY < canvas.height) {
+        pdf.addPage();
+        pdfState.usedHeightPx = 0;
+        pdfState.usedHeightPt = 0;
+        pdfState.pageStarted = false;
+      }
     }
   }
 
@@ -991,7 +1056,36 @@
     var root = built.root, sections = built.sections;
     var jsPDF = window.jspdf.jsPDF;
 
-    return new Promise(function (resolve) { setTimeout(resolve, 80); })
+    // Antes de medir cualquier posición de texto, esperamos a que las
+    // fuentes web (Playfair Display, Poppins — cargadas con
+    // font-display:swap en index.html) hayan terminado de aplicarse.
+    // Con "swap", el navegador dibuja el texto de inmediato con una fuente
+    // de respaldo y lo reemplaza por la fuente real en cuanto termina de
+    // descargarla — ese reemplazo puede cambiar el ancho de cada letra y
+    // por lo tanto en qué línea envuelve cada palabra. Un setTimeout fijo
+    // (usado antes) asume que ese reemplazo siempre ya ocurrió, pero en una
+    // conexión más lenta o la primera carga de fuente en el dispositivo de
+    // la clienta, el temporizador podía cumplirse ANTES de que la fuente
+    // definitiva estuviera lista: se medían las posiciones de línea con la
+    // fuente de respaldo, y para cuando html2canvas capturaba el canvas
+    // (con la fuente ya cambiada), el texto real ya no coincidía con esas
+    // posiciones — cortando líneas que en el momento de medir no existían
+    // en esa forma. document.fonts.ready es la señal correcta y specific
+    // del navegador para "las fuentes ya están listas", sin depender de
+    // adivinar cuánto tiempo hace falta esperar.
+    var fontsReady = (document.fonts && document.fonts.ready)
+      ? document.fonts.ready
+      : new Promise(function (resolve) { resolve(); });
+
+    return fontsReady
+      .catch(function () {}) // si fonts.ready llega a rechazar, seguimos igual
+      .then(function () {
+        // Un pequeño margen adicional tras fonts.ready para el reflow del
+        // layout que el navegador aplica justo después del cambio de
+        // fuente (no es una apuesta a ciegas: fonts.ready ya garantiza que
+        // la fuente está lista, esto solo cubre el frame de repintado).
+        return new Promise(function (resolve) { setTimeout(resolve, 80); });
+      })
       .then(function () {
         // Se recolectan los rangos "no partibles" y los puntos de corte
         // entre líneas de TODAS las secciones ANTES de capturar/limpiar,
