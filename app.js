@@ -138,6 +138,18 @@
 
   function pad2(n) { return n < 10 ? "0" + n : "" + n; }
 
+  // Detecta iOS (iPhone/iPad/iPod). iPadOS desde la versión 13 identifica su
+  // user agent como si fuera un Mac de escritorio, así que esa forma de
+  // detección se complementa comprobando si además soporta eventos táctiles
+  // (algo que un Mac real no tiene) — sin esto, un iPad quedaría sin
+  // detectar y seguiría mostrando el mismo problema que en iPhone.
+  function isIOS() {
+    var ua = navigator.userAgent || "";
+    if (/iPad|iPhone|iPod/.test(ua)) return true;
+    if (/Macintosh/.test(ua) && navigator.maxTouchPoints && navigator.maxTouchPoints > 1) return true;
+    return false;
+  }
+
   /* ---------------------------------------------------------
      2. FORMULARIO — máscara + validación
      --------------------------------------------------------- */
@@ -550,6 +562,9 @@
     btn.id = "downloadBtn";
     btn.addEventListener("click", handleDownload);
     box.appendChild(btn);
+    var shareNote = el("p", "download-share-note",
+      "¿Vas a compartirlo por WhatsApp? Ábrelo primero desde la carpeta de Descargas de tu teléfono y compártelo desde ahí, para asegurarte de que la otra persona pueda abrirlo sin problema.");
+    box.appendChild(shareNote);
     container.appendChild(box);
 
     container.appendChild(el("div", "footer-note", "Con profundo amor · Tere Becerra Huerta · Creadora del Código Maestro de Vida™"));
@@ -706,7 +721,20 @@
     if (root && root.parentNode) root.parentNode.removeChild(root);
   }
 
-  var PDF_SCALE = 2; // debe coincidir con el "scale" pasado a html2canvas más abajo
+  // PDF_SCALE controla la resolución de captura de cada página (más alto =
+  // más nítido, pero también un archivo más pesado). Se bajó de 2 a 1.5 (y
+  // la calidad JPEG de 0.93 a 0.80, ver toDataURL más abajo) porque el
+  // documento completo pesaba entre 10 y 16 MB — un archivo de ese tamaño,
+  // generado como blob en el navegador, tiene una probabilidad real de
+  // fallar al compartirse desde Android: el gestor de descargas de Android
+  // no siempre logra "materializar" un blob grande como archivo real en el
+  // teléfono, y apps como WhatsApp terminan compartiendo la referencia al
+  // blob en memoria en vez del archivo — un link que solo funciona en el
+  // navegador donde se generó y da 404 para cualquier otra persona. Con
+  // estos valores el documento pesa routinely bajo 5 MB, con el texto
+  // igual de nítido y legible (probado con OCR), reduciendo mucho ese
+  // riesgo. Ambos números deben cambiarse juntos si se ajustan de nuevo.
+  var PDF_SCALE = 1.5; // debe coincidir con el "scale" pasado a html2canvas más abajo
 
   // Elementos que NUNCA deben quedar cortados a la mitad entre dos páginas
   // (párrafos, tarjetas, encabezados, firma, la tarjeta de la declaración, etc.).
@@ -979,7 +1007,7 @@
       ctx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
       ctx.drawImage(canvas, 0, renderedY, canvas.width, sliceHeightPx, 0, 0, canvas.width, sliceHeightPx);
 
-      var imgData = sliceCanvas.toDataURL("image/jpeg", 0.93);
+      var imgData = sliceCanvas.toDataURL("image/jpeg", 0.80);
       var sliceHeightPt = sliceHeightPx / pxPerPt;
 
       pdf.addImage(imgData, "JPEG", margin, margin + pdfState.usedHeightPt, contentW, sliceHeightPt);
@@ -1051,7 +1079,7 @@
     });
   }
 
-  function generatePdf() {
+  function generatePdf(iosTabName) {
     var built = buildExportRoot();
     var root = built.root, sections = built.sections;
     var jsPDF = window.jspdf.jsPDF;
@@ -1149,7 +1177,40 @@
         cleanupExportRoot(root);
         var safeName = state.name.trim().replace(/\s+/g, "_").replace(/[\\/:*?"<>|]/g, "");
         var dateStr = pad2(state.day) + "_" + pad2(state.month) + "_" + state.year;
-        pdf.save("Mapa_" + safeName + "_" + dateStr + ".pdf");
+        var filename = "Mapa_" + safeName + "_" + dateStr + ".pdf";
+
+        // En iOS, pdf.save() de jsPDF no descarga un archivo real de forma
+        // confiable: Safari no soporta bien el atributo download en enlaces
+        // de blob, así que en su lugar suele abrir el PDF en una pestaña
+        // nueva mostrando la URL "blob:..." en la barra de direcciones —
+        // sin que quede guardado como archivo en el teléfono. Si la
+        // clienta comparte desde ahí (por ejemplo por WhatsApp), lo que se
+        // comparte es esa misma URL de blob, que solo existe en su propio
+        // Safari — cualquier otra persona que la reciba ve un error 404,
+        // porque no es un archivo real, es una referencia temporal en
+        // memoria. La solución es no pelear contra ese comportamiento:
+        // handleDownload ya abrió una pestaña (en blanco) de forma
+        // sincrónica dentro del clic, usando un NOMBRE de destino fijo en
+        // vez de "_blank" — eso permite reabrirla por nombre aquí mismo,
+        // ya con el PDF listo, y esta forma de navegar sí actualiza el
+        // contenido de forma confiable (a diferencia de guardar la
+        // referencia de la ventana y asignarle .location.href más tarde,
+        // que en varias pruebas verificadas se queda en blanco sin ningún
+        // error visible).
+        if (iosTabName) {
+          var blobUrl = URL.createObjectURL(pdf.output("blob"));
+          window.open(blobUrl, iosTabName);
+          setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 60000);
+          alert(
+            "Tu Mapa se abrió en una pestaña nueva.\n\n" +
+            "Para guardarlo y poder compartirlo por WhatsApp sin problema:\n" +
+            "1. Toca el ícono de Compartir (el cuadrado con la flecha hacia arriba)\n" +
+            "2. Elige \"Guardar en Archivos\"\n" +
+            "3. Desde ahí ya puedes compartirlo con quien quieras"
+          );
+        } else {
+          pdf.save(filename);
+        }
       })
       .catch(function (err) {
         cleanupExportRoot(root);
@@ -1224,10 +1285,39 @@
     var originalText = btn.textContent;
     btn.textContent = "Generando tu documento…";
 
+    // En iOS hay que abrir la pestaña AQUÍ, de forma sincrónica dentro del
+    // propio manejador del clic — es la única forma en que Safari (y la
+    // mayoría de navegadores) no la trata como un popup no solicitado y la
+    // bloquea. Si esperáramos a que generatePdf() termine (una operación
+    // asíncrona) para recién ahí llamar a window.open, ya no cuenta como
+    // "iniciado directamente por el usuario" y la ventana no se abre en
+    // absoluto — silenciosamente, sin ningún error visible.
+    //
+    // Para la navegación posterior (una vez que el PDF ya está listo) NO
+    // usamos la referencia guardada con tab.location.href = url: esa forma
+    // de navegar una ventana ya abierta no es confiable — en varios casos
+    // documentados y verificados aquí mismo, la ventana se queda en blanco
+    // sin ningún error. La técnica que sí funciona de forma consistente es
+    // volver a llamar a window.open() con ese MISMO nombre de destino
+    // ("_pdf_tab" en vez de "_blank"): el navegador reconoce que ya existe
+    // una ventana con ese nombre y la reutiliza/navega en vez de abrir una
+    // nueva — y a diferencia de asignar location.href, esta sí actualiza
+    // el contenido de forma confiable incluso después de una espera async.
+    var IOS_TAB_NAME = "_pdf_tab";
+    var isIOSDevice = isIOS();
+    if (isIOSDevice) window.open("", IOS_TAB_NAME);
+
     ensurePdfLibraries()
-      .then(function () { return generatePdf(); })
+      .then(function () { return generatePdf(isIOSDevice ? IOS_TAB_NAME : null); })
       .catch(function (err) {
         console.error("[Mapa PDF] Error generando documento:", err);
+        // Si hubo un error, cerramos la pestaña provisional (reabriéndola
+        // por nombre nos da la misma referencia) para no dejarla colgada
+        // en blanco.
+        if (isIOSDevice) {
+          var tabToClose = window.open("", IOS_TAB_NAME);
+          if (tabToClose) tabToClose.close();
+        }
         var detail = (err && err.message) || "";
         var friendly = detail && /conexión|internet|cargaron/i.test(detail)
           ? detail
